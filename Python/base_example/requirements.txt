@@ -1,0 +1,2 @@
+optima-v2-runtime[native,xnnpack]
+numpy
