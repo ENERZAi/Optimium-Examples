@@ -12,5 +12,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+
+        maven {
+            name = "local"
+            url = uri("/Users/numver8638/Desktop/outputs/kotlin")
+        }
     }
 }
