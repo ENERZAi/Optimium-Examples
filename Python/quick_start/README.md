@@ -4,9 +4,15 @@ This example describes how to run face detection model in Python with Optimium.
 
 > This example assumes your device runs on ARM64(AArch64, armv8-a) architecture CPU.
 
-## How to build
+## How to Run
 
+1. Install prerequisites.
+    ``` bash
+    pip install -r requirements.txt
+    ```
+    
 1. Copy the model into your working directory. The model file (`face_detection_short_range.tflite`) is in the `Models` folder of the repository.
+
 2. Optimize the model using Optimium.
     ``` bash
     # Create a template
