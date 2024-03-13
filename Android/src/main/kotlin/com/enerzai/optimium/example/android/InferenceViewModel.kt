@@ -39,6 +39,7 @@ class InferenceViewModel(private val appContext: Context) : ViewModel() {
         private const val THICKNESS = 2
 
         private const val FILE_PROVIDER = BuildConfig.APPLICATION_ID + ".file-provider"
+        private const val MODEL_NAME = "model" // edit it to your model name
     }
 
     var uiState: UiState by mutableStateOf(UiState.INIT)
@@ -79,7 +80,7 @@ class InferenceViewModel(private val appContext: Context) : ViewModel() {
                 appContext.filesDir.mkdirs()
 
                 // Extract model in temporary folder
-                modelPath = extract("model")
+                modelPath = extract(MODEL_NAME)
 
                 // Create context
                 val factory = ContextFactory()

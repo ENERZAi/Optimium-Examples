@@ -1,0 +1,4 @@
+optimium-runtime[native,xnnpack]
+numpy
+flask
+pillow

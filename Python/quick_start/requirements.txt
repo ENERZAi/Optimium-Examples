@@ -1,0 +1,2 @@
+optimium-runtime[native,xnnpack]
+numpy

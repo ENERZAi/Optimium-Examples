@@ -1,7 +1,6 @@
 package com.enerzai.optimium.example.android
 
 import android.graphics.Bitmap
-import android.util.Log
 import org.opencv.android.Utils
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -22,8 +21,8 @@ private const val MIN_SCORE = 0.5f
 private const val RAW_SCORE_LIMIT = 80f
 private const val CLASSES_COUNT = 896
 private const val BOX_COORD_OFFSET = 16
-private const val MIN_SUPPRESSION_THRESHOLD = 0.3f
-//private const val MIN_SUPPRESSION_THRESHOLD = 0.1f
+//private const val MIN_SUPPRESSION_THRESHOLD = 0.3f
+private const val MIN_SUPPRESSION_THRESHOLD = 0.2f
 
 internal fun calculateAnchors(): List<FloatPair> {
     // Copied from mediapipe/modules/face_detection/face_detection_short_range.pbtxt
@@ -145,20 +144,6 @@ private fun convertToDetections(boxes: FloatArray, scores: FloatArray): List<Det
 
 data class IntFloatPair(val i: Int, val f: Float)
 
-private fun makeStr(data: List<IntFloatPair>): String {
-    val buffer = StringBuilder()
-
-    buffer.append("[")
-
-    data.forEach {
-        buffer.append("(").append(it.i).append(", ").append(it.f).append("), ")
-    }
-
-    buffer.append("]")
-
-    return buffer.toString()
-}
-
 internal fun nonMaximumSuppression(detections: List<Detection>): List<Detection> {
     val indexedScores = detections.mapIndexed { index, det -> IntFloatPair(index, det.score) }.sortedByDescending { it.f }
     val outputs = arrayListOf<Detection>()
@@ -168,10 +153,6 @@ internal fun nonMaximumSuppression(detections: List<Detection>): List<Detection>
     var backed = LinkedList<IntFloatPair>()
 
     while (remaining.isNotEmpty()) {
-        Log.d(TAG, "remaining = ${makeStr(remaining)}")
-        Log.d(TAG, "candidate = ${makeStr(candidate)}")
-        Log.d(TAG, "backed = ${makeStr(backed)}")
-
         val (index, score) = remaining.first()
 
         if (score < MIN_SCORE)
@@ -189,10 +170,8 @@ internal fun nonMaximumSuppression(detections: List<Detection>): List<Detection>
             val similarity = box.iou(detection.box)
 
             if (similarity > MIN_SUPPRESSION_THRESHOLD) {
-                Log.d(TAG, "box($box) ~= detection($detection): $similarity")
                 candidate.add(pair)
             } else {
-                Log.d(TAG, "box($box) != detection($detection): $similarity")
                 backed.add(pair)
             }
         }

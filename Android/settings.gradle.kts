@@ -7,6 +7,8 @@ pluginManagement {
     }
 }
 
+val OPTIMIUM_SDK_ROOT = System.getenv("OPTIMIUM_SDK_ROOT") ?: throw GradleException("OPTIMIUM_SDK_ROOT is not set.")
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -15,7 +17,7 @@ dependencyResolutionManagement {
 
         maven {
             name = "local"
-            url = uri("/Users/numver8638/Desktop/outputs/kotlin")
+            url = uri("$OPTIMIUM_SDK_ROOT/kotlin")
         }
     }
 }
