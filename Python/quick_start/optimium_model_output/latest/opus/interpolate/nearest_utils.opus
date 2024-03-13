@@ -1,0 +1,62 @@
+module core.List.List as ll
+module common.utils as commonutils
+module interpolate.utils as utils
+
+let rec setCoordExpr_impl index params spatial_dims nextOp =
+    if(index == (spatial_dims-1i)){
+        !{
+            let ${params->nearcoord_prefix+toStr(index)} = ${
+                ll.item <| index <| params->nearestcoordlist
+            }
+            ${nextOp}
+        }
+        
+    } else{
+        !{
+            let ${params->nearcoord_prefix+toStr(index)} = ${
+                ll.item <| index <| params->nearestcoordlist
+            }
+            ${
+                setCoordExpr_impl <| (index + 1i) <| params <| spatial_dims <| nextOp
+            }
+        }
+    }
+
+let setCoordExpr params spatial_dims nextOp =
+    setCoordExpr_impl <| 0i <| params <| spatial_dims <| nextOp
+
+
+
+let genNearestPointAccess spatial_dims spatial_nums params nextop =
+    let spatial_index = utils.get_Spatial_index <| params->spatial_iter <| params
+
+    let rec get_rt_index_list index =
+        if( index == spatial_dims){
+            []
+        } else{
+            ll.concat <| [!{${params->nearcoord_prefix+toStr(index)}[(${ll.item <| index <| spatial_index},)]}] <|
+                (get_rt_index_list <| (index+1i))
+        }
+    let rt_index_list = if(params->nchw){
+        ll.concat <| [!{0i}] <| (ll.concat <| [!{0i}] <| (get_rt_index_list <| 0i)   )
+    } else{
+        ll.concat <| [!{0i}] <| (ll.concat <| (get_rt_index_list <| 0i) <| [!{0i}]  )
+    }
+
+    !{
+        let ${params->inputaccess_prefix} = batchinput[${ll.toRtTuple <| rt_index_list}]
+        ${nextop}
+    }
+
+let genStore spatial_dims spatial_nums params =
+    let spatial_index = utils.get_Spatial_index <| params->spatial_iter <| params
+    let store_index = if (params->nchw){
+        ll.concat <| [!{0i}] <| (ll.concat <| [!{0i}] <| spatial_index )
+    } else{
+        ll.concat <| [!{0i}] <| (ll.concat <| spatial_index <| [!{0i}] )
+    }
+    !{
+        batchoutput[${ll.toRtTuple <| store_index}] <- ${params->inputaccess_prefix}
+    }
+
+_end_

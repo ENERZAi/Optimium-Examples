@@ -1,0 +1,332 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module reduce.utils as ru
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun softmax(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${
+        let input_dtype = ll.item 0 (ll.item 0 input_dtypes)
+        let input_shape = ll.item 0 (ll.item 0 input_shapes)
+        let input_scales = ll.item 0 (ll.item 0 input_scales)
+        let input_zero_points = ll.item 0 (ll.item 0 input_zero_points)
+        let output_dtype = ll.item 0 (ll.item 0 output_dtypes)
+        let output_shape = ll.item 0 (ll.item 0 output_shapes)
+        let output_scales = ll.item 0 (ll.item 0 output_scales)
+        let output_zero_points = ll.item 0 (ll.item 0 output_zero_points)
+
+        let rec shape_size index shape data =
+            if (index == (ll.len shape)) {
+                data
+            } else {
+                shape_size (index + 1) shape (data * (ll.item index shape))
+            }
+
+        let input_size = shape_size 0 input_shape 1
+        let output_size = shape_size 0 output_shape 1
+
+        let thislayer_params =
+            match (ll.item 0 layer_params) with
+                | params.Softmax x -> x
+
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+
+        let tensordim = ll.len input_shape
+
+        let _ =
+            if (tensordim != ll.len output_shape) {
+                except("input, output tensors' dimensions do not match")
+            } else {
+                _end_
+            }
+
+        let lastshape = ll.item (tensordim - 1) input_shape
+
+        let _ = if (pack * unroll > lastshape) {
+            except("pack * unroll(" + toStr(pack * unroll) + ") should be larger than one of the shape of last dimension of input(" + toStr(lastshape) + ")")
+        } else {
+            _end_
+        }
+
+        let axis =
+            if (thislayer_params->axis < 0) {
+                tensordim + thislayer_params->axis
+            } else {
+                thislayer_params->axis
+            }
+
+        let _ =
+            if (axis < 0 || axis >= tensordim) {
+                except("invalid layer parameter: axis = " + toStr(axis))
+            } else {
+                _end_
+            }
+
+        let axis_size = ll.item axis input_shape
+
+        let size_before_axis =
+            if (axis == 0) {
+                1
+            } else {
+                let shape_before_axis = ru.get_list_slice 0 axis input_shape
+                shape_size 0 shape_before_axis 1
+            }
+
+        let size_after_axis = shape_size (axis + 1) input_shape 1
+
+        for (i from 0 to tensordim) {
+            if (ll.item i output_shape == ll.item i input_shape) {
+                _end_
+            } else {
+                except("output shape(" + toStr(output_shape) + ") is not compatible with expected shape(" + toStr(input_shape) + "}")
+            }
+        }
+
+        let isQuant = input_dtype == rtType(i8)
+
+        let is_reshaped = axis == tensordim - 1
+
+        let get_constants size =
+            if (input_dtype == rtType(f32)) {
+                !{
+                    let magic_bias = 12583039.000000f // 2 ^ 24 - 2 ^ 22 + 127
+                    let log2e = 1.4426950216293335f
+                    let minus_ln2 = -0.6931471824645996f
+
+                    let c1 = 0.9999997019767761f
+                    let c2 = 0.4999915063381195f
+                    let c3 = 0.1666765213012695f
+                    let c4 = 0.0418978221714497f
+                    let c5 = 0.0082892905920744f
+
+                    let one = 1.0f
+                    let zeros = 0.0f
+                    let shifts = 23i
+
+                    (magic_bias, log2e, minus_ln2, c1, c2, c3, c4, c5, one, zeros, shifts)
+                }
+            } else if (input_dtype == rtType(f16)) {
+                !{
+                    let magic_bias = 1551.0000f16 // 2 ^ 11 - 2 ^ 9 + 15
+                    let log2e = 1.4426950216293335f16
+                    let minus_ln2 = -0.6931471824645996f16
+
+                    let c1 = 1.0f16
+                    let c2 = 0.5f16
+                    let c3 = 0.166748046875f16
+                    let c4 = 0.04180908203125f16
+                    let c5 = 0.007587432861328125f16
+
+                    let one = 1.0f16
+                    let zeros = 0.0f16
+                    let shifts = 10i16
+
+                    (magic_bias, log2e, minus_ln2, c1, c2, c3, c4, c5, one, zeros, shifts)
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+
+        // calculate (cast<f32>(cast<i32>(${var_name})))
+        let fast_round var_name uid =
+            let dummy_name = "var" + toStr(uid)
+            !{
+                let ${dummy_name} = ${var_name} + magic_bias
+                -(magic_bias - ${dummy_name})
+            }
+
+        // calculate (1 << ${var_name})
+        let fast_power_of_two var_name uid =
+            let dummy_name = "var" + toStr(uid)
+            if (input_dtype == rtType(f32)) {
+                !{
+                    let ${dummy_name} = ${var_name} + magic_bias
+                    bitcast<f32>(bitcast<i32>(${dummy_name}) << shifts)
+                }
+            } else {
+                !{
+                    let ${dummy_name} = ${var_name} + magic_bias
+                    bitcast<f16>(bitcast<i16>(${dummy_name}) << shifts)
+                }
+            }
+
+        let calculate_extexp input_iters tensor_name =
+            !{
+                let x = ${tensor_name}[${(ll.toRtTuple input_iters)}]
+
+                let z = x * log2e
+                let n = ${fast_round "z" 0}
+
+                let t = n * minus_ln2 + x
+
+                let mut p = c5 * t + c4 // 5th order approximation
+                p <- p * t + c3
+                p <- p * t + c2
+                p <- p * t + c1
+                p <- p * t + one
+                mantissa_tensor[${(ll.toRtTuple input_iters)}] <- p
+                exponent_tensor[${(ll.toRtTuple input_iters)}] <- n
+                (p, n)
+            }
+
+        let inner_logic input_iters output_access =
+            let input_tensor_name = if (is_reshaped) { "input_reshaped" } else { "batchinput" }
+            let output_tensor_name = if (is_reshaped) { "output_reshaped" } else { "batchoutput" }
+            let mantissa_sum = if (input_dtype == rtType(f32)) { 0.f32 } else { 0.f16 }
+            let exponent_max = if (input_dtype == rtType(f32)) { -10000.f32 } else { -10000.f16 }
+            !{
+                let (magic_bias, log2e, minus_ln2, c1, c2, c3, c4, c5, one, zeros, shifts) = ${get_constants pack}
+
+                let mut mantissa_sum = ${mantissa_sum}
+                let mut exponent_max = ${exponent_max} // FIXME -inf
+
+                for (${"r_idx" + toStr(axis)} from 0 to ${axis_size}) {
+                    let (mantissa, exponent) = ${calculate_extexp input_iters input_tensor_name}
+
+                    let new_exponent_max = __max(exponent_max, exponent)
+                    let diff1 = new_exponent_max - exponent
+                    let diff2 = new_exponent_max - exponent_max
+
+                    // let coeffcient1 = cast<f32>(1 << __max(cast<i32>(new_exponent_max - exponent), 0))
+                    // let coeffcient2 = cast<f32>(1 << __max(cast<i32>(new_exponent_max - exponent_max), 0))
+                    let coeffcient1 = ${fast_power_of_two "diff1" 1}
+                    let coeffcient2 = ${fast_power_of_two "diff2" 2}
+                    mantissa_sum <- (mantissa / coeffcient1) + (mantissa_sum / coeffcient2)
+                    exponent_max <- new_exponent_max
+                }
+
+                let divisor = one / mantissa_sum
+
+                for (${"r_idx" + toStr(axis)} from 0 to ${axis_size}) {
+                    let mantissa = mantissa_tensor[${(ll.toRtTuple input_iters)}]
+                    let exponent = exponent_tensor[${(ll.toRtTuple input_iters)}]
+                    let diff3 = exponent_max - exponent
+                    // ${output_tensor_name}[${ll.toRtTuple output_access}] <- mantissa * divisor / cast<f32>(1 << cast<i32>(exponent_max - exponent))
+                    let coeffcient3 = ${fast_power_of_two "diff3" 3}
+                    let result = mantissa * divisor / coeffcient3
+                    ${output_tensor_name}[${ll.toRtTuple output_access}] <- result
+                }
+            }
+
+        // FIXME: use pack param, improve algorithms, refactor
+        if (axis == tensordim - 1) {
+            let input_iters = !{idx0} ; !{${"r_idx" + toStr(axis)}} ; []
+            let output_access = !{idx0} ; !{${"r_idx" + toStr(axis)}} ; []
+
+            if (input_dtype == rtType(f32)) {
+                !{
+                    let batchinput = inputs[|0|]
+                    let mut batchoutput = &outputs[|0|]
+
+                    let input_reshaped = reshapeTo((${size_before_axis}, ${axis_size},), &batchinput)
+                    let mut output_reshaped = reshapeTo((${size_before_axis}, ${axis_size}), &batchoutput)
+
+                    let mut mantissa_tensor = tensor((${size_before_axis}, ${axis_size},), 0f32)
+                    let mut exponent_tensor = tensor((${size_before_axis}, ${axis_size},), 0f32)
+
+                    for (idx0 from ${0} to ${size_before_axis} step 1) {
+                        ${inner_logic input_iters output_access}
+                    }
+
+                    0
+                }
+            } else if (input_dtype == rtType(f16)) {
+                !{
+                    let batchinput = inputs[|0|]
+                    let mut batchoutput = &outputs[|0|]
+
+                    let input_reshaped = reshapeTo((${size_before_axis}, ${axis_size},), &batchinput)
+                    let mut output_reshaped = reshapeTo((${size_before_axis}, ${axis_size}), &batchoutput)
+
+                    let mut mantissa_tensor = tensor((${size_before_axis}, ${axis_size},), 0f16)
+                    let mut exponent_tensor = tensor((${size_before_axis}, ${axis_size},), 0f16)
+
+                    for (idx0 from ${0} to ${size_before_axis} step 1) {
+                        ${inner_logic input_iters output_access}
+                    }
+
+                    0
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+        } else {
+            let outer_indices = ru.get_list_slice 0 tensordim output_shape
+            let rec get_indices cur_idx cur_not_red =
+                if (cur_idx == tensordim) {
+                    []
+                } else if (cur_idx == axis) {
+                    !{${("r_idx" + toStr(cur_idx))}} ; (get_indices (cur_idx + 1) (cur_not_red + 1))
+                } else {
+                    !{${("idx" + toStr(cur_not_red))}} ; (get_indices (cur_idx + 1) (cur_not_red + 1))
+                }
+            let input_iters = get_indices 0 0
+            let output_access = get_indices 0 0
+
+            let nest_loop out_iter inner_logic idx =
+                if (idx == tensordim - 1) {
+                    inner_logic input_iters output_access
+                } else {
+                    out_iter (idx + 1)
+                }
+
+            if (input_dtype == rtType(f32)) {
+                !{
+                    let batchinput = inputs[|0|]
+                    let mut batchoutput = &outputs[|0|]
+
+                    let mut mantissa_tensor = tensor(${ll.toRtTuple input_shape}, 0f32)
+                    let mut exponent_tensor = tensor(${ll.toRtTuple input_shape}, 0f32)
+
+                    let _ =
+                        ${
+                            let rec out_iter idx =
+                                if (idx != axis) {
+                                    !{
+                                        for (${"idx" + toStr(idx)} from 0 to ${ll.item idx outer_indices}) {
+                                            ${nest_loop out_iter inner_logic idx}
+                                        }
+                                    }
+                                } else {
+                                    nest_loop out_iter inner_logic idx
+                                }
+                            out_iter 0
+                        }
+                    0
+                }
+            } else if (input_dtype == rtType(f16)) {
+                !{
+                    let batchinput = inputs[|0|]
+                    let mut batchoutput = &outputs[|0|]
+
+                    let mut mantissa_tensor = tensor(${ll.toRtTuple input_shape}, 0f16)
+                    let mut exponent_tensor = tensor(${ll.toRtTuple input_shape}, 0f16)
+
+                    let _ =
+                        ${
+                            let rec out_iter idx =
+                                if (idx != axis) {
+                                    !{
+                                        for (${"idx" + toStr(idx)} from 0 to ${ll.item idx outer_indices}) {
+                                            ${nest_loop out_iter inner_logic idx}
+                                        }
+                                    }
+                                } else {
+                                    nest_loop out_iter inner_logic idx
+                                }
+                            out_iter 0
+                        }
+                    0
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+        }
+    }
+}

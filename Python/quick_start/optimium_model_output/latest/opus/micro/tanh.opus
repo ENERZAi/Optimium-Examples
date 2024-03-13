@@ -1,0 +1,165 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module micro.utils as mu
+// let (isMain, passScale, setVars, loopOps, microOps, storeOps) = getMicroLayerImpl
+
+let isMain = false
+
+let passScale input_scales output_scales =
+    let input_scale = ll.item 0 input_scales
+    let output_scale = ll.item 0 output_scales
+
+    if(ut.isEmpty input_scale){
+        ([1.f], 32, true)
+    } else{
+        let si = ut.toCtTensorF32 input_scale
+        let so = ut.toCtTensorF32 output_scale
+
+        ([si / so], 16, true)
+    }
+
+let setVars layer_param input_data input_shapes input_zero_points output_shapes output_zero_points input_edges output_edges input_tomains output_tomains input_towhichedges output_towhichedges ismain prefix accumscale = 
+    mu.baseNotMainSetVars layer_param input_data input_shapes input_zero_points output_shapes output_zero_points input_edges output_edges input_tomains output_tomains input_towhichedges output_towhichedges ismain prefix accumscale
+
+let loopOps layer_param input_shapes input_dtypes input_zero_points output_shapes output_dtypes output_zero_points output_towhichedges prefix =
+    // not implemented
+    let impl outputnames nextop =
+        nextop
+    impl
+
+let microOps layer_param input_data input_shapes input_edges output_edges input_tomains output_tomains ismain prefix = 
+    // quantization will be supported
+    let impl inputvectorname outputvectorname vectorstartidxlist vectorsize vectordtype nextop =
+        let inputvector = inputvectorname
+        let outputvector = outputvectorname
+        let zero =
+            if(vectordtype == rtType(f32)){
+                !{0.f32}
+            } else if(vectordtype == rtType(f16)){
+                !{0.f16}
+            } else if(vectordtype == rtType(i8)){
+                !{0i8}
+            } else if(vectordtype == rtType(i32)){
+                !{0i32}
+            }
+
+        let get_constants size =
+            if (vectordtype == rtType(f32)) {
+                !{
+                    let neg_sat_cutoff = tensor((${size},), -1.5f32)
+                    let pos_sat_cutoff = tensor((${size},), 1.5f32)
+
+                    let c3 = tensor((${size},), -0.33330571651458740234375f32)
+                    let c5 = tensor((${size},), 0.1330046951770782470703125f32)
+                    let c7 = tensor((${size},), -0.05260427296161651611328125f32)
+                    let c9 = tensor((${size},), 0.01905878819525241851806640625f32)
+                    let c11 = tensor((${size},), -0.0055121383629739284515380859375f32)
+                    let c13 = tensor((${size},), 0.00104447430931031703948974609375f32)
+                    let c15 = tensor((${size},), -0.00009209793643094599246978759765625f32)
+
+                    (&c3, &c5, &c7, &c9, &c11, &c13, &c15, &neg_sat_cutoff, &pos_sat_cutoff)
+                }
+            } else if (vectordtype == rtType(f16)) {
+                !{
+                    let neg_sat_cutoff = tensor((${size},), -1.5f16)
+                    let pos_sat_cutoff = tensor((${size},), 1.5f16)
+
+                    let c3 = tensor((${size},), -0.333333f16)
+                    let c5 = tensor((${size},), 0.13330078125f16)
+                    let c7 = tensor((${size},), -0.053192138671875f16)
+                    let c9 = tensor((${size},), 0.0166015625f16)
+
+                    (&c3, &c5, &c7, &c9, &neg_sat_cutoff, &pos_sat_cutoff)
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+
+        let calculate_tanh =
+            if (vectordtype == rtType(f32)) {
+                !{
+                    let x1 = ${inputvector}
+                    let x2 = __max(neg_sat_cutoff, x1)
+                    let x3 = __min(pos_sat_cutoff, x2)
+                    let x_square = x3 * x3
+
+                    let mut p = c15 * x_square + c13
+                    p <- p * x_square + c11
+                    p <- p * x_square + c9
+                    p <- p * x_square + c7
+                    p <- p * x_square + c5
+                    p <- p * x_square + c3
+
+                    let xt = x3 * x_square
+                    let result = p * xt + x3
+
+                    &result
+                }
+            } else if (vectordtype == rtType(f16)) {
+                !{
+                    let x1 = ${inputvector}
+                    let x2 = __max(neg_sat_cutoff, x1)
+                    let x3 = __min(pos_sat_cutoff, x2)
+                    let x_square = x3 * x3
+
+                    let mut p = c9 * x_square + c7
+                    p <- p * x_square + c5
+                    p <- p * x_square + c3
+
+                    let xt = x3 * x_square
+                    let result = p * xt + x3
+
+                    &result
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+
+        let last_expr =
+            if (inputvectorname == outputvectorname) {
+                !{
+                    ${outputvector} <- result
+                    ${nextop}
+                }
+            } else {
+                !{
+                    let ${outputvector} = result
+                    ${nextop}
+                }
+            }
+
+        if (vectordtype == rtType(f32)) {
+            !{
+                let (c3, c5, c7, c9, c11, c13, c15, neg_sat_cutoff, pos_sat_cutoff) = ${get_constants vectorsize}
+                let result = ${calculate_tanh}
+
+                ${last_expr}
+            }
+        } else {
+            !{
+                let (c3, c5, c7, c9, neg_sat_cutoff, pos_sat_cutoff) = ${get_constants vectorsize}
+                let result = ${calculate_tanh}
+
+                ${last_expr}
+            }
+        }
+
+    impl
+
+let storeOps =
+    // not implemented
+    let impl nextop =
+        nextop
+    impl
+
+let mapIdxCtOps layer_param input_shapes output_shapes =
+    let impl idxlist isflatten =
+        idxlist
+    impl
+
+let padOps layer_param input_shapes output_shapes =
+    mu.basePadOps layer_param input_shapes output_shapes
+
+let microImpl = (isMain, passScale, setVars, loopOps, microOps, storeOps, padOps)
+
+_end_

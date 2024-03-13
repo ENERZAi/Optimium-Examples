@@ -1,0 +1,49 @@
+module core.List.List as ll
+module pad.utils as u
+module common.params as params
+module common.utils as commonutils
+module common.uniontensor as ut
+
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun pad(inputs : input_t, mut &outputs: output_t) -> i32{
+    ${
+        let thislayer_params =
+            match (ll.item 0 layer_params) with
+                | params.Pad x -> x
+
+        let input_dtype = ll.item 0 (ll.item 0 input_dtypes)
+        let input_shape = ll.item 0 (ll.item 0 input_shapes)
+        let input_scale = ll.item 0 (ll.item 0 input_scales)
+        let input_zero_point = ll.item 0 (ll.item 0 input_zero_points)
+        let output_dtype = ll.item 0 (ll.item 0 output_dtypes)
+        let output_shape = ll.item 0 (ll.item 0 output_shapes)
+        let output_scale = ll.item 0 (ll.item 0 output_scales)
+        let output_zero_point = ll.item 0 (ll.item 0 output_zero_points)
+
+        let framework = thislayer_params->framework
+        // nchw - TODO
+        let nchw = false
+        let padding = thislayer_params->padding
+        let padvalue = thislayer_params->padvalue // TODO
+        
+
+
+        let templateparams = u.TemplateParameters(input_t, input_dtype, input_shape,
+                                                output_t, output_dtype, output_shape, framework, nchw,
+                                                padding, input_scales, input_zero_point)
+        let params = u.initCodeGen templateparams
+
+        let expr0 = u.setBatch <| params
+        let expr1 = u.setFillPadExpr <| params
+
+        let expr2 = u.storeInput <| params
+
+        expr0 <| (expr1 <| expr2)
+    }
+}

@@ -1,0 +1,81 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module micro.utils as mu
+// let (isMain, passScale, setVars, loopOps, microOps, storeOps) = getMicroLayerImpl 
+
+let isMain = true
+
+let passScale input_scales output_scales = 
+    let input_scale = ll.item 0 input_scales
+    let weight_scale = ll.item 1 input_scales
+    let output_scale = ll.item 0 output_scales
+
+    if(ut.isEmpty weight_scale){
+        ([1.f], 32, true)
+    } else{
+        let si = ut.toCtTensorF32 input_scale
+        let sw = ut.toCtTensorF32 weight_scale
+        let so = ut.toCtTensorF32 output_scale
+
+        ([si * sw / so], 32, true)
+    }
+
+let setVars layer_param input_data input_shapes input_zero_points output_shapes output_zero_points input_edges output_edges input_tomains output_tomains input_towhichedges output_towhichedges ismain prefix accumscale = 
+    let impl inputnames outputnames inputshapes outputshapes ismutinputs nextop =
+        let (inputlayer, inputedge) = ll.item 0 input_edges
+        let inputname = ll.item 0 inputnames
+        let inputshape = ll.item 0 inputshapes
+        let setinput nextvar = 
+            if(inputlayer == -1){ // runtime input
+                !{
+                    let mut ${inputname} = reshapeTo(${ll.toRtTuple inputshape}, &inputs[|${inputedge}|])
+                    ${nextvar}
+                }
+            } else{
+                nextvar
+            }
+        let (outputlayer, outputedge) = ll.item 0 output_edges
+        let outputname = ll.item 0 outputnames
+        let outputshape = ll.item 0 outputshapes
+        let setoutput nextvar = 
+            if(outputlayer == -1){
+                !{
+                    let mut ${outputname} = reshapeTo(${ll.toRtTuple outputshape}, &outputs[|${outputedge}|])
+                    ${nextvar}
+                }
+            } else{
+                nextvar
+            }
+        setinput (setoutput nextop)
+
+    impl
+
+let loopOps layer_param input_shapes input_dtypes input_zero_points output_shapes output_dtypes output_zero_points output_towhichedges prefix =
+    // not implemented
+    let impl outputnames nextop =
+        nextop
+    impl
+
+let microOps layer_param input_data input_shapes input_edges output_edges input_tomains output_tomains ismain prefix = 
+    // not implemented
+    let impl inputvectorname outputvectorname vectorstartidxlist vectorsize vectordtype nextop = 
+        nextop
+    impl
+
+let storeOps =  
+    // not implemented
+    let impl nextop =
+        nextop
+    impl
+
+let mapIdxCtOps layer_param input_shapes output_shapes =
+    let impl idxlist isflatten = 
+        idxlist
+    impl
+
+let padOps layer_param input_shapes output_shapes = 
+    mu.basePadOps layer_param input_shapes output_shapes
+
+let microImpl = (isMain, passScale, setVars, loopOps, microOps, storeOps, padOps)
+
+_end_

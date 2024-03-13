@@ -1,0 +1,74 @@
+module common.uniontensor as ut
+module common.layerparams as lparams
+module core.List.List as ll
+
+type Attributes = {
+    name : string,
+    num_threads : i32,
+}
+
+type Optimization = {
+    pack : ll.List<i32>,
+    unroll : ll.List<i32>,
+    tile : ll.List<i32>, 
+    algorithm : string,
+    inplace : bool,
+    nchw : bool,
+}
+
+type Layer =
+    | Castnadya of lparams.Castnadya
+    | Interpolate of lparams.Interpolate
+    | Less of lparams.Less
+    | Reshape of lparams.Reshape
+    | Conv2d of lparams.Conv2d
+    | Conv2dtranspose of lparams.Conv2dtranspose
+    | Pool2d of lparams.Pool2d
+    | Linear of lparams.Linear
+    | Add of lparams.Add
+    | Sub of lparams.Sub
+    | Mul of lparams.Mul
+    | Div of lparams.Div
+    | Floordiv of lparams.Floordiv
+    | Quantize of lparams.Quantize
+    | Dequantize of lparams.Dequantize
+    | Abs of lparams.Abs
+    | Ceil of lparams.Ceil
+    | Neg of lparams.Neg
+    | Sigmoid of lparams.Sigmoid
+    | Exp of lparams.Exp
+    | Tanh of lparams.Tanh
+    | Sin of lparams.Sin
+    | Cos of lparams.Cos
+    | Softmax of lparams.Softmax
+    | Round of lparams.Round
+    | Rsqrt of lparams.Rsqrt
+    | Sqrt of lparams.Sqrt
+    | Square of lparams.Square
+    | Relu of lparams.Relu
+    | Relu6 of lparams.Relu6
+    | Leaky_relu of lparams.Leaky_relu
+    | Prelu of lparams.Prelu
+    | Elu of lparams.Elu
+    | Hardswish of lparams.Hardswish
+    | Sum of lparams.Sum
+    | Mean of lparams.Mean
+    | Reduce_prod of lparams.Reduce_prod
+    | Reduce_max of lparams.Reduce_max
+    | Reduce_min of lparams.Reduce_min
+    | Reduce_any of lparams.Reduce_any
+    | Transpose of lparams.Transpose
+    | Pixelshuffle of lparams.Pixelshuffle
+    | Space_to_depth of lparams.Space_to_depth
+    | Space_to_batch of lparams.Space_to_batch
+    | Batch_to_space of lparams.Batch_to_space
+    | Squeeze of lparams.Squeeze
+    | Pad of lparams.Pad
+    | Concat of lparams.Concat
+    | Sigmoid of lparams.Sigmoid
+    | Gather of lparams.Gather
+    | Slice of lparams.Slice
+
+// let getLayerparams layer = 
+//     match layer with
+//         | _ x -> x

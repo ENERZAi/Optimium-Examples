@@ -1,0 +1,228 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun space_to_batch(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${  
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Space_to_batch x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex0 layer_params) with 
+                | params.Space_to_batch x -> x
+
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input1_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)  
+        
+        let block_shape = layerparams -> block_shape
+        let paddings = layerparams -> padding
+        let input1_dim = ll.len input1_shape
+
+        let block_dim = ll.len block_shape
+
+        let rec shape_size index shape data =
+            if(index == (ll.len shape)){
+                data
+            } else{
+                shape_size (index+1) shape (data*(ll.item index shape))
+            }
+        let input1_size = shape_size 0 input1_shape 1
+        let output_size = shape_size 0 output_shape 1
+        let block_size = shape_size 0 block_shape 1
+        let loofsize = block_size*(ll.item 1 input1_shape)*(ll.item 2 input1_shape)*(ll.item 3 input1_shape)
+        
+        let _ = if((pack * unroll > input1_size)){
+            except("pack * unroll(" + toStr(pack * unroll) + ") should be larger than size of input1(" + toStr(input1_size) + ")")
+        } else{
+            _end_
+        }
+
+        let sum_padding c = 
+            ((ll.item 0 c) + (ll.item 1 c))
+
+        let padding_shape = 
+            let rec get_padding_shape index =
+                if(index == 0){
+                    (ll.item 0 input1_shape);(get_padding_shape (index+1))
+                }else if(index > block_dim){
+                    if(index == (input1_dim-1)){
+                        [ll.item index input1_shape]
+                    }else{
+                        (ll.item index input1_shape);(get_padding_shape (index+1))
+                    }
+                }else{
+                    if(index == (input1_dim-1)){
+                        [(ll.item index input1_shape) + (sum_padding (ll.item (index-1) paddings))]
+                    }else{
+                        ((ll.item index input1_shape) + (sum_padding (ll.item (index-1) paddings)));(get_padding_shape (index+1))
+                    }
+                }
+            get_padding_shape 0
+            
+        let padding_str =
+            let rec get_padding_str index =
+                if(index == 0){
+                    ("0:"+toStr(ll.item 0 input1_shape)+":1");(get_padding_str (index+1))
+                }else if(index > block_dim){
+                    if(index == (input1_dim-1)){
+                        ["0:"+toStr(ll.item index input1_shape)+":1"]
+                    }else{
+                        ("0:"+toStr(ll.item index input1_shape)+":1");(get_padding_str (index+1))
+                    }
+                }else{
+                    if(index == (input1_dim-1)){
+                        [toStr(ll.item 0 (ll.item (index-1) paddings))+":"+toStr((ll.item index input1_shape)+(ll.item 0 (ll.item (index-1) paddings)))+":1"]
+                    }else{
+                        (toStr(ll.item 0 (ll.item (index-1) paddings))+":"+toStr((ll.item index input1_shape)+(ll.item 0 (ll.item (index-1) paddings)))+":1");(get_padding_str (index+1))
+                    }
+                }
+            get_padding_str 0
+
+        let reshaped_shape =
+            let rec get_reshaped_shape index =
+                if(index == 0){
+                    (ll.item 0 padding_shape);(get_reshaped_shape (index+1))
+                }else if(index >= (2*(block_dim)+1)){
+                    if(index == (input1_dim+block_dim-1)){
+                        [(ll.item (index-block_dim) padding_shape)]
+                    }else{
+                        (ll.item (index-block_dim) padding_shape);(get_reshaped_shape (index+1))
+                    }
+                }else{
+                    if(index == (input1_dim+block_dim-2)){
+                        [((ll.item (index/2+1) padding_shape)/(ll.item (index/2) block_shape));(ll.item (index/2) block_shape)]
+                    }else{
+                        ((ll.item (index/2+1) padding_shape)/(ll.item (index/2) block_shape));((ll.item (index/2) block_shape);(get_reshaped_shape (index+2)))
+                    }
+                }
+            get_reshaped_shape 0
+
+        let reshaped_dim = ll.len reshaped_shape
+
+        let transpose_params =
+            let rec front_params index =
+                if(index == block_dim-1){
+                    [2*index+2]
+                }else{
+                    (2*index+2);(front_params (index+1))
+                }
+            let rec middle_params index =
+                if(index == 0){
+                    (0);(middle_params 1)
+                } else if(index == block_dim){
+                    [2*index-1]
+                }else{
+                    (2*index-1);(middle_params (index+1))
+                }
+            let rec last_params index =
+                if(index == reshaped_dim-1){
+                    [index]
+                }else{
+                    (index);(last_params (index+1))
+                }
+            ll.concat (ll.concat (front_params 0) (middle_params 0)) (last_params (2*block_dim+1))
+        
+        let transposed_shape = 
+            let rec get_transposed_shape index =
+                if(index == reshaped_dim-1){
+                    [ll.item (ll.item index transpose_params) reshaped_shape]
+                }else{
+                    (ll.item (ll.item index transpose_params) reshaped_shape);(get_transposed_shape (index+1))
+                }
+            get_transposed_shape 0
+
+        
+        let index_range = 
+            let s2 = input1_dim-1
+            let s1 = 
+                if((ll.item s2 transpose_params) == input1_dim-1){
+                    (input1_dim-2)
+                }else{
+                    (ll.item s2 transpose_params)
+                }
+
+            let rec get_range switch1 switch2 index = 
+                if(index == reshaped_dim){
+                    []
+                }else if(index == switch1){
+                    (switch2);(get_range switch1 switch2 (index+1))
+                }else if(index == switch2){
+                    (switch1);(get_range switch1 switch2 (index+1))
+                }else{
+                    (index);(get_range switch1 switch2 (index+1))
+                }
+            get_range s1 (s2-1) 0
+
+        let rec index_str index =
+            if (index == reshaped_dim-1){
+                [(!{${"idx"+toStr(index)}})]
+            } else{
+                (!{${"idx"+toStr(index)}});(index_str (index+1))
+            }
+        
+        let rec output_index_str index =
+            if (index == reshaped_dim-1){
+                [!{${"idx" + toStr(ll.item (index) transpose_params)}}]
+            } else {
+                ll.concat ([!{${"idx" + toStr(ll.item (index) transpose_params)}}]) (output_index_str (index+1))
+            }
+
+        let ind_str = index_str 0
+        let out_str = output_index_str 0
+        
+        let rec do_transpose idx = 
+            if (idx == reshaped_dim - 1){
+                !{
+                    for(${"idx"+toStr((ll.item idx index_range))} from 0 to ${ll.item (ll.item idx index_range) reshaped_shape} step 1){
+                        transposed_data[${ll.toRtTuple out_str}] <- reshape_input1[${ll.toRtTuple ind_str}]
+                    }
+                    _end_
+                }
+            }else {
+                !{
+                    for(${"idx"+toStr((ll.item idx index_range))} from 0 to ${ll.item (ll.item idx index_range) reshaped_shape} step 1){
+                        ${do_transpose (idx+1)}
+                    }
+                    ${
+                        if (idx == 0){
+                            !{
+                                0
+                            }
+                        } else{
+                            !{_end_}
+                        }
+                    }
+                }
+            }
+        !{
+            let mut batchoutput = &outputs[|0|]
+            let batchinput1 = inputs[|0|]
+            let mut reshape_input = tensor(${ll.toRtTuple padding_shape},0.f32)
+            reshape_input[${ll.toRtTuple padding_str}] <- batchinput1
+            let mut reshape_input1 = reshapeTo(${ll.toRtTuple reshaped_shape},&reshape_input)
+            let mut transposed_data = reshapeTo(${ll.toRtTuple transposed_shape},&batchoutput)
+
+            ${do_transpose 0}
+        }
+    }
+}

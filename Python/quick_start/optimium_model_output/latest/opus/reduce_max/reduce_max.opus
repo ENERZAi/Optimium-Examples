@@ -1,0 +1,455 @@
+module core.List.List as ll
+module reduce.utils as u
+module common.utils as commonutils
+module common.uniontensor as ut
+module common.params as params
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun reduce_max(input: input_t, mut &output: output_t) -> i32 {
+    ${
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Reduce_max x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex layer_params) with 
+                | params.Reduce_max x -> x
+
+        let input_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)   
+
+        let tmpPack = ll.item 0 (optim_params->pack)
+        let tmpUnroll = ll.item 0 (optim_params->unroll)
+        let input_dim = ll.len <| input_shape
+        let axis = layerparams->dim
+        let keepdims = layerparams->keepdim
+        // let axes = match axis with
+        //             | commonutils.None -> ll.reverse <| (u.createIncList <| [] <| (input_dim - 1))
+        //             | commonutils.Value lst -> lst
+        let axes = axis
+        let num_axes = ll.len <| axes
+        let max_reduction_axis = ll.item <| (num_axes - 1) <| axes
+
+        let is_quant = (input_dtype == rtType(i8))
+        let in_zero_val =
+            if (is_quant) {
+                u.index_uniontensor <| (0,) <| input_zero_points
+            } else {
+                0i32
+            }
+        let out_zero_val =
+            if (is_quant) {
+                u.index_uniontensor <| (0,) <| output_zero_points
+            } else {
+                0i32
+            }
+        let is_same_scale =
+            if (is_quant) {
+                let in_scale_bit = bitcast<u32>((ut.toCtTensorF32 <| input_scales)[(0,)])
+                let out_scale_bit = bitcast<u32>((ut.toCtTensorF32 <| output_scales)[(0,)])
+                in_scale_bit == out_scale_bit
+            } else {
+                true
+            }
+        let scale_val =
+            if (is_quant) {
+                ((ut.toCtTensorF32 <| input_scales) / (ut.toCtTensorF32 <| output_scales))[(0,)]
+            } else {
+                0.f32
+            }
+
+        let last_consec_parallel_axis = 
+            if (max_reduction_axis == (input_dim - 1)) {
+                -1
+            } else {
+                max_reduction_axis + 1
+            }
+        if (last_consec_parallel_axis >= 0) {
+            let last_consec_parallel_num = (ll.len <| input_shape) - last_consec_parallel_axis
+            let last_parallel_size = 
+                let folder s e = s * e
+                let parallel_shapes = u.get_list_slice <| ((ll.len <| output_shape) - last_consec_parallel_num) <| (ll.len <| output_shape) <| output_shape
+                ll.fold folder 1 parallel_shapes
+
+            let pack = if ((last_parallel_size % tmpPack) == 0) {
+                tmpPack
+            } else {
+                ll.item <| ((ll.len <| input_shape) - 1) <| input_shape
+            }
+
+            let ct_vec = 
+                if (is_quant) {
+                    ut.TensorI8(tensor((pack,), -128i8))
+                } else if(input_dtype == rtType(f16)){
+                    ut.TensorF16(tensor((pack,), cast<f16>(-inf)))
+                } else {
+                    ut.TensorF32(tensor((pack,), cast<f32>(-inf)))
+                }
+            let ct_input_zero = 
+                if (is_quant) {
+                    ut.TensorI32(tensor((pack,), cast<i32>(in_zero_val)))
+                } else if(input_dtype == rtType(f16)){
+                    ut.TensorF16(tensor((pack,), 0.f16))
+                } else {
+                    ut.TensorF32(tensor((pack,), 0.f32))
+                }
+            let ct_output_zero =
+                if (is_quant) {
+                    ut.TensorI32(tensor((pack,), cast<i32>(out_zero_val)))
+                } else if(input_dtype == rtType(f16)){
+                    ut.TensorF16(tensor((pack,), 0.f16))
+                } else {
+                    ut.TensorF32(tensor((pack,), 0.f32))
+                }
+            let (ct_mult_vec, ct_shift_vec) =
+                if (is_quant) {
+                    let scale_vec = ut.TensorF32(tensor((pack,), scale_val))
+                    ut.multf32toi32 <| scale_vec <| 32
+                } else {
+                    (ut.EMPTY, ut.EMPTY)
+                }
+            let ct_round_vec = 
+                if (is_quant) {
+                    let shift_val = u.index_uniontensor <| (0,) <| ct_shift_vec
+                    let mut vec = tensor((pack,), 1i32)
+                    vec <- (vec << tensor((1,), (shift_val - 1)))
+                    ut.TensorI32(vec)
+                } else {
+                    ut.EMPTY
+                }
+
+            let reduce_indices =
+                u.extract_elems_by_indices <| axes <| input_shape
+            let outer_indices = 
+                u.get_list_slice <| 0 <| ((ll.len <| output_shape) - last_consec_parallel_num) <| output_shape
+            let input_iters = 
+                let partial_input = u.get_list_slice <| 0 <| ((ll.len <| input_shape) - last_consec_parallel_num) <| input_shape
+                u.get_input_indices <| partial_input <| axes <| pack <| keepdims
+            let output_access =
+                let partial_input = u.get_list_slice <| 0 <| ((ll.len <| input_shape) - last_consec_parallel_num) <| input_shape
+                let result = u.get_output_access <| partial_input <| axes <| keepdims <| pack
+                if ((ll.len <| result) == 0) {
+                    [0]
+                } else {
+                    result
+                }
+            
+            let output_packed_shape = ll.concat <| outer_indices <| [(last_parallel_size / pack) ; pack]
+            let input_packed_shape = 
+                ll.concat <| (u.get_list_slice <| 0 <| ((ll.len <| input_shape) - last_consec_parallel_num) <| input_shape) <| [(last_parallel_size / pack) ; pack]
+            !{
+                let input_reshaped = reshapeTo(${ll.toRtTuple <| input_packed_shape}, input[|0|])
+                let mut output_reshaped = reshapeTo(${ll.toRtTuple <| output_packed_shape}, &output[|0|])
+                ${
+                    let rec out_iter idx =
+                        if (idx == 0){
+                            !{
+                                for(${"idx" + toStr(idx)} from 0 to ${ll.item <| idx <| outer_indices}) {
+                                    ${
+                                        if (idx == ((ll.len <| outer_indices) - 1)) {
+                                            !{
+                                                for (p from 0 to ${(last_parallel_size / pack)}) {
+                                                    let mut vec = ${ut.toRtTensor <| ct_vec}
+                                                    ${
+                                                        let rec reduce_iter r_idx = 
+                                                            if(r_idx == 0){
+                                                                !{
+                                                                    for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                        ${
+                                                                            if (r_idx == (num_axes - 1)){
+                                                                                !{
+                                                                                    //TODO: apply build-in function
+                                                                                    //e.g., vec <- max(vec, input_reshaped[${(ll.toRtTuple <| input_iters)}])
+                                                                                    let input_vec = input_reshaped[${(ll.toRtTuple <| input_iters)}]
+                                                                                    for(vec_idx from 0 to ${pack}) {
+                                                                                        let vec_val = vec[(vec_idx,)]
+                                                                                        let input_val = input_vec[(vec_idx,)]
+                                                                                        vec[(vec_idx,)] <- (
+                                                                                            if (vec_val < input_val) {
+                                                                                                input_val
+                                                                                            } else {
+                                                                                                vec_val
+                                                                                            }
+                                                                                        )
+                                                                                    }
+                                                                                }
+                                                                            } else {
+                                                                                reduce_iter (r_idx + 1)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    ${
+                                                                        if (is_quant && !is_same_scale) {
+                                                                            !{
+                                                                                let mult_vec = cast<i64>(${ut.toRtTensor <| ct_mult_vec})
+                                                                                let shift_vec = ${ut.toRtTensor <| ct_shift_vec}
+                                                                                let round_vec = ${ut.toRtTensor <| ct_round_vec}
+                                                                                let inzero_added = cast<i32>(vec) - ${ut.toRtTensor <| ct_input_zero}
+                                                                                let multiplied = cast<i32>((mult_vec * cast<i64>(inzero_added)) >> tensor((1,),31))
+                                                                                let rounded = multiplied + round_vec
+                                                                                let shifted = rounded >> shift_vec
+                                                                                let accum_vec = shifted + ${ut.toRtTensor <| ct_output_zero}
+                                                                                output_reshaped[${ll.toRtTuple <| output_access}] <- cast<i8>(accum_vec)
+                                                                            }
+                                                                        } else {
+                                                                            !{
+                                                                                output_reshaped[${ll.toRtTuple <| output_access}] <- vec
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    
+                                                                }
+                                                            } else {
+                                                                !{
+                                                                    for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                        ${
+                                                                            if (r_idx == (num_axes - 1)){
+                                                                                !{
+                                                                                    //TODO: apply build-in function
+                                                                                    //e.g., vec <- max(vec, input_reshaped[${(ll.toRtTuple <| input_iters)}])
+                                                                                    let input_vec = input_reshaped[${(ll.toRtTuple <| input_iters)}]
+                                                                                    vec <- __max(vec, input_vec)
+                                                                                }
+                                                                            } else {
+                                                                                reduce_iter (r_idx + 1)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        reduce_iter 0
+                                                    }
+                                                }
+                                            } 
+                                        } else {
+                                            !{
+                                                ${out_iter (idx + 1)}
+                                            }
+                                        }
+                                    }
+                                }
+                                0 
+                            }
+                        } else {
+                            !{
+                                for(${"idx" + toStr(idx)} from 0 to ${ll.item <| idx <| outer_indices}) {
+                                    ${
+                                        if (idx == ((ll.len <| outer_indices) - 1)) {
+                                            !{
+                                                for (p from 0 to ${(last_parallel_size / pack)}) {
+                                                    let mut vec = ${ut.toRtTensor <| ct_vec}
+                                                    ${
+                                                        let rec reduce_iter r_idx = 
+                                                            if(r_idx == 0){
+                                                                !{
+                                                                    for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                        ${
+                                                                            if (r_idx == (num_axes - 1)){
+                                                                                !{
+                                                                                    //TODO: apply build-in function
+                                                                                    //e.g., vec <- max(vec, input_reshaped[${(ll.toRtTuple <| input_iters)}])
+                                                                                    let input_vec = input_reshaped[${(ll.toRtTuple <| input_iters)}]
+                                                                                    vec <- __max(vec, input_val)
+                                                                                }
+                                                                            } else {
+                                                                                reduce_iter (r_idx + 1)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    ${
+                                                                        if (is_quant && !is_same_scale) {
+                                                                            !{
+                                                                                let mult_vec = cast<i64>(${ut.toRtTensor <| ct_mult_vec})
+                                                                                let shift_vec = ${ut.toRtTensor <| ct_shift_vec}
+                                                                                let round_vec = ${ut.toRtTensor <| ct_round_vec}
+                                                                                let inzero_added = cast<i32>(vec) - ${ut.toRtTensor <| ct_input_zero}
+                                                                                let multiplied = cast<i32>((mult_vec * cast<i64>(inzero_added)) >> tensor((1,),31))
+                                                                                let rounded = multiplied + round_vec
+                                                                                let shifted = rounded >> shift_vec
+                                                                                let accum_vec = shifted + ${ut.toRtTensor <| ct_output_zero}
+                                                                                output_reshaped[${ll.toRtTuple <| output_access}] <- cast<i8>(accum_vec)
+                                                                            }
+                                                                        } else {
+                                                                            !{
+                                                                                output_reshaped[${ll.toRtTuple <| output_access}] <- vec
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                !{
+                                                                    for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                        ${
+                                                                            if (r_idx == (num_axes - 1)){
+                                                                                !{
+                                                                                    //TODO: apply build-in function
+                                                                                    //e.g., vec <- max(vec, input_reshaped[${(ll.toRtTuple <| input_iters)}])
+                                                                                    let input_vec = input_reshaped[${(ll.toRtTuple <| input_iters)}]
+                                                                                    vec <- __max(vec, input)
+                                                                                }
+                                                                            } else {
+                                                                                reduce_iter (r_idx + 1)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        reduce_iter 0
+                                                    }
+                                                }
+                                            } 
+                                        } else {
+                                            !{
+                                                ${out_iter (idx + 1)}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    out_iter 0
+                }
+            }
+        } else {
+            let (mult, shift) =
+                if (is_quant) {
+                    let scale_vec = ut.TensorF32(tensor((1,), scale_val))
+                    let (mult_vec, shift_vec) = ut.multf32toi32 <| scale_vec <| 32
+                    let mult = u.index_uniontensor <| (0,) <| mult_vec
+                    let shift = u.index_uniontensor <| (0,) <| shift_vec
+                    (mult, shift)
+                } else {
+                    (1i32, 0i32)
+                }
+            let round = 
+                if (is_quant) {
+                    1i32 << (shift - 1)
+                } else {
+                    0i32
+                }
+            let reduce_indices =
+                u.extract_elems_by_indices <| axes <| input_shape
+            let outer_indices = 
+                u.get_list_slice <| 0 <| (ll.len <| output_shape) <| output_shape
+            let input_iters = 
+                u.get_input_indices_no_pack <| input_shape <| axes <| keepdims
+            let output_access =
+                let result = u.get_output_access_no_pack <| input_shape <| axes <| keepdims
+                if ((ll.len <| result) == 0) {
+                    [0]
+                } else {
+                    result
+                }
+            !{
+                ${
+                    let rec out_iter idx =
+                        !{
+                            for(${"idx" + toStr(idx)} from 0 to ${ll.item <| idx <| outer_indices}) {
+                                ${
+                                    if (idx == ((ll.len <| output_shape) - 1)) {
+                                        !{
+                                            let mut max_val =
+                                                ${
+                                                    if (is_quant) {
+                                                        !{${-128i8}}
+                                                    } else {
+                                                        !{-99999.f32}
+                                                    }
+                                                }
+                                            ${
+                                                let rec reduce_iter r_idx = 
+                                                    if(r_idx == 0){
+                                                        !{
+                                                            for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                ${
+                                                                    if (r_idx == (num_axes - 1)){
+                                                                        !{
+                                                                            max_val <- (
+                                                                                    let new_val = input[${(ll.toRtTuple <| input_iters)}]
+                                                                                    // if (max_val < new_val) {
+                                                                                    //     new_val
+                                                                                    // } else {
+                                                                                    //     max_val
+                                                                                    // }
+                                                                                    __max(max_val, new_val)
+                                                                                )
+                                                                            
+                                                                        }
+                                                                    } else {
+                                                                        reduce_iter (r_idx + 1)
+                                                                    }
+                                                                }
+                                                            }
+                                                            ${
+                                                                if (is_quant && !is_same_scale) {
+                                                                    !{
+                                                                        let inzero_added = cast<i32>(max_val) - (${in_zero_val})
+                                                                        let multiplied = cast<i32>((cast<i64>(${mult}) * cast<i64>(inzero_added)) >> 31)
+                                                                        let rounded = multiplied + ${round}
+                                                                        let shifted = rounded >> ${shift}
+                                                                        let accum_acc = shifted + (${out_zero_val})
+                                                                        output[${ll.toRtTuple <| output_access}] <- cast<i8>(accum_acc)
+                                                                    }
+                                                                } else {
+                                                                    !{
+                                                                        output[${ll.toRtTuple <| output_access}] <- max_val
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        !{
+                                                            for(${"r_idx" + toStr(r_idx)} from 0 to ${ll.item <| r_idx <| reduce_indices}) {
+                                                                ${
+                                                                    if (r_idx == (num_axes - 1)){
+                                                                        !{
+                                                                            max_val <- (
+                                                                                    let new_val = input[${(ll.toRtTuple <| input_iters)}]
+                                                                                    // if (max_val < new_val) {
+                                                                                    //     new_val
+                                                                                    // } else {
+                                                                                    //     max_val
+                                                                                    // }
+                                                                                    __max(max_val, new_val)
+                                                                                )
+                                                                        }
+                                                                    } else {
+                                                                        reduce_iter (r_idx + 1)
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                reduce_iter 0
+                                            }
+                                        } 
+                                    } else {
+                                        !{
+                                            ${out_iter (idx + 1)}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    out_iter 0
+                }
+            }
+        }
+    }
+}

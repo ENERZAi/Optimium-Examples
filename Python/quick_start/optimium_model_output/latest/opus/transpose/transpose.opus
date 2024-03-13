@@ -1,0 +1,107 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun transpose(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${  
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Transpose x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex layer_params) with 
+                | params.Transpose x -> x
+
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input1_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)   
+        
+        let transpose_params = layerparams -> permdim
+        let input1_dim = ll.len input1_shape
+
+        let index_range = 
+            let s2 = input1_dim-1
+            let s1 = 
+                if((ll.item s2 transpose_params) == input1_dim-1){
+                    (input1_dim-2)
+                }else{
+                    (ll.item s2 transpose_params)
+                }
+
+            let rec get_range switch1 switch2 index = 
+                if(index == input1_dim){
+                    []
+                }else if(index == switch1){
+                    (switch2);(get_range switch1 switch2 (index+1))
+                }else if(index == switch2){
+                    (switch1);(get_range switch1 switch2 (index+1))
+                }else{
+                    (index);(get_range switch1 switch2 (index+1))
+                }
+            get_range s1 (s2-1) 0
+
+        let rec index_str index =
+            if (index == input1_dim-1){
+                [(!{${"idx"+toStr(index)}})]
+            } else{
+                (!{${"idx"+toStr(index)}});(index_str (index+1))
+            }
+        
+        let rec output_index_str index =
+            if (index == input1_dim-1){
+                [!{${"idx" + toStr(ll.item (index) transpose_params)}}]
+            } else {
+                ll.concat ([!{${"idx" + toStr(ll.item (index) transpose_params)}}]) (output_index_str (index+1))
+            }
+
+        let ind_str = index_str 0
+        let out_str = output_index_str 0
+
+        let rec do_transpose idx = 
+            if (idx == input1_dim - 1){
+                !{
+                    for(${"idx"+toStr(ll.item idx index_range)} from 0 to ${ll.item (ll.item idx index_range) input1_shape} step 1){
+                        batchoutput[${ll.toRtTuple out_str}] <- batchinput1[${ll.toRtTuple ind_str}]
+                    }
+                    _end_
+                }
+            }else {
+                !{
+                    for(${"idx"+toStr(ll.item idx index_range)} from 0 to ${ll.item (ll.item idx index_range) input1_shape} step 1){
+                        ${do_transpose (idx+1)}
+                    }
+                    ${
+                        if (idx == 0){
+                            !{0}
+                        } else{
+                            !{_end_}
+                        }
+                    }
+                }
+            }
+        !{
+            let mut batchoutput = &outputs[|0|]
+            let batchinput1 = inputs[|0|]
+
+            ${do_transpose 0}
+        }
+    }
+}

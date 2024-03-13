@@ -1,0 +1,1581 @@
+module core
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module micro.fusion as fsn
+
+let prepareMultShift params =
+    match params->input_scales with
+        | ut.EMPTY  -> (ut.EMPTY, ut.EMPTY)
+        | _         -> 
+            let output_scales = ut.toCtTensorF32 (params->output_scales)
+            let input_scales = ut.toCtTensorF32 (params->input_scales)
+
+            let signMask = 0x80000000u32
+            let exponentMask = 0x7F800000u32
+            let exponentShift = 23u32
+            let exponentBias = 127u32
+            let fractionMask = 0x007FFFFFu32
+            let fractionShift = 7u32
+            let fractionOne = 0x00800000u32
+            let shiftbuff = 7
+            let significant_bits = 16
+
+            if(params->pooltype == "avgpool2d"){
+                let (weightrows, weightcols) = params->pool_size
+                // let mut mult = tensor(shapeOf(input_scales), 0i32)
+                // let mut shift = tensor(shapeOf(input_scales), 0i32)
+                let mut mult = tensor((weightrows * weightcols + 1,), 1i32)
+                let mut shift = tensor((weightrows * weightcols + 1,), 0i32)
+
+                for (i from 1 to shapeOf(mult)[|0|]){
+                    let scale = input_scales[(0,)] / output_scales[(0,)] / cast<f32>(i)
+                    // let _ = if((i == 1) && ((abs (scale - 1.)) < 0.000001)){
+                    //     print("same")
+                    //     shift[(0,)] <- -1
+                    //     _end_
+                    // }
+
+                    let _ = if (scale > 1f32) 
+                        except("scale is larger than 1")
+
+                    let scale_bits = bitcast<u32>(scale)
+                    // let scale_bits = 1u32
+                    // mult[(i,)] <- cast<i32>(((scale_bits & fractionMask) | fractionOne) << fractionShift) + (1 << 16)
+                    // shift[(i,)] <- (1) * ((exponentBias + (31 - 32) - (scale_bits >> exponentShift)))
+                    mult[(i,)] <- (cast<i32>(((scale_bits & fractionMask) | fractionOne) << fractionShift) + (1 << (31 - significant_bits))) >> (31 - significant_bits)
+                    shift[(i,)] <- (1) * ((exponentBias + significant_bits - 1  - (scale_bits >> exponentShift)))
+                }
+
+                (ut.TensorI32(mult), ut.TensorI32(shift))
+            } else{
+                (ut.TensorI32(tensor((1,), -1)), ut.TensorI32(tensor((1,), -1)))
+            }
+
+let prepareInputPattern params inputpadopsimpls outputpadopsimpls = 
+    let (batch, inrows, incols, inch) = params->input_shape
+    let (_, outrows, outcols, outch) = params->output_shape
+    let (weightrows, weightcols) = params->pool_size
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = params->unroll
+    let (packinch, packoutch) = params->pack
+    let stride = params->stride
+    let dilation = params->dilation
+
+    let (padt, padb, padl, padr) = params->padding
+    let (padding, input_shape) = fsn.padOps inputpadopsimpls ([[0; 0]; [padt; padb]; [padl; padr]; [0; 0]]) ([batch; inrows; incols; inch])
+    let (outpadding, output_shape) = fsn.padOps outputpadopsimpls ([[0; 0]; [0; 0]; [0; 0]; [0; 0]]) ([batch; outrows; outcols; outch])
+
+    let bottomA, rightA = outrows - outrows % unrollrow, outcols - outcols % unrollcol
+    let tileA, unrollA = (0, 0, bottomA, rightA), (unrollrow, unrollcol)
+    let tileB, unrollB = (0, rightA, bottomA, outcols), (unrollrow, outcols % unrollcol)
+    let tileC, unrollC = (bottomA, 0, outrows, rightA), (outrows % unrollrow, unrollcol)
+    let tileD, unrollD = (bottomA, rightA, outrows, outcols), (outrows % unrollrow, outcols % unrollcol)
+
+    let genTiledInputPattern tile unroll params = 
+        let (striderow, stridecol) = params->stride
+        let (dilationrow, dilationcol) = params->dilation
+        let (unrollrow, unrollcol) = unroll
+        // let (padt, padb, padl, padr) = params->padding
+        let (padt, padb, padl, padr) = (ll.item 0 (ll.item 1 padding), ll.item 1 (ll.item 1 padding), ll.item 0 (ll.item 2 padding), ll.item 1 (ll.item 2 padding))
+        let (outpadt, outpadb, outpadl, outpadr) = (ll.item 0 (ll.item 1 outpadding), ll.item 1 (ll.item 1 outpadding), ll.item 0 (ll.item 2 outpadding), ll.item 1 (ll.item 2 outpadding))
+        let (inrows, incols, inch) = (ll.item 1 input_shape, ll.item 2 input_shape, ll.item 3 input_shape)
+        let (outrows, outcols, outch) = (ll.item 1 output_shape, ll.item 2 output_shape, ll.item 3 output_shape)
+        let (top, left, bottom, right) = tile
+
+        if ((unrollrow == 0) || (unrollcol == 0)){
+            let inputpatternstep = 0
+            let inputpatternlen = 0
+            let mut inputpattern = tensor((1,), 0i32)
+            let divpattern = tensor((1,), 0i32)
+            let divpatternlen = 0
+
+            (inputpattern, inputpatternstep, inputpatternlen, divpattern, divpatternlen)
+        } else if(params->pooltype == "avgpool2d"){
+            let inputlength = batch * inrows * incols * inch
+            let inputpatternstep = weightcols * weightrows * unrollcol * unrollrow + unrollrow * unrollcol
+            let inputpatternlen = ((bottom - top) / unrollrow) * ((right - left) / unrollcol) * inputpatternstep
+            let divpatternlen = ((bottom - top) / unrollrow) * ((right - left) / unrollcol)
+
+            let mut offset = 0i
+            let mut offsetdiv = 0i
+            let mut inputpattern = tensor((inputpatternlen,), 0i32)
+            let mut divpattern = tensor((divpatternlen,), 0i32)
+            for (i from top to bottom step unrollrow){
+                for (j from left to right step unrollcol){
+                    for (ui from 0 to unrollrow){
+                        for (uj from 0 to unrollcol){
+                            let mut div = 0
+                            for (si from 0 to weightrows){
+                                for (sj from 0 to weightcols){
+                                    let ii = -padt + striderow * (i + ui) + dilationrow * si
+                                    let jj = -padl + stridecol * (j + uj) + dilationcol * sj
+                                    let _ = if ((ii >= 0) && (ii <= inrows - 1) && (jj >= 0) && (jj <= incols - 1)){
+                                        inputpattern[(offset,)] <- inch * jj + inch * incols * ii
+                                        div <- div + 1
+                                        _end_
+                                    } else{
+                                        inputpattern[(offset,)] <- inputlength
+                                        _end_
+                                    }
+                                    offset <- offset + 1
+                                }
+                            }
+                            inputpattern[(offset,)] <- outch * (outpadl + j + uj) + outch * outcols * (outpadt + i + ui)
+                            divpattern[(offsetdiv,)] <- div
+                            offset <- offset + 1
+                            offsetdiv <- offsetdiv + 1
+                        }
+                    }
+                }
+            }
+
+            (inputpattern, inputpatternstep, inputpatternlen, divpattern, divpatternlen)
+
+        } else{
+            let inputlength = batch * inrows * incols * inch
+            let inputpatternstep = weightcols * weightrows * unrollcol * unrollrow + unrollrow * unrollcol
+            let inputpatternlen = ((bottom - top) / unrollrow) * ((right - left) / unrollcol) * inputpatternstep
+            let divpatternlen = 1
+
+            let mut offset = 0i
+            let mut offsetdiv = 0i
+            let mut inputpattern = tensor((inputpatternlen,), 0i32)
+            let mut divpattern = tensor((divpatternlen,), 0i32)
+            for (i from top to bottom step unrollrow){
+                for (j from left to right step unrollcol){
+                    for (ui from 0 to unrollrow){
+                        for (uj from 0 to unrollcol){
+                            for (si from 0 to weightrows){
+                                for (sj from 0 to weightcols){
+                                    let ii = -padt + striderow * (i + ui) + dilationrow * si
+                                    let jj = -padl + stridecol * (j + uj) + dilationcol * sj
+                                    let _ = if ((ii >= 0) && (ii <= inrows - 1) && (jj >= 0) && (jj <= incols - 1))
+                                        inputpattern[(offset,)] <- inch * jj + inch * incols * ii
+                                        _end_
+                                    else
+                                        inputpattern[(offset,)] <- inputlength
+                                        _end_
+                                    offset <- offset + 1
+                                }
+                            }
+                            inputpattern[(offset,)] <- outch * (outpadl + j + uj) + outch * outcols * (outpadt + i + ui)
+                            offset <- offset + 1
+                        }
+                    }
+                }
+            }
+
+            (inputpattern, inputpatternstep, inputpatternlen, divpattern, divpatternlen)
+
+        }
+
+    let (inputpatternA, inputpatternstepA, inputpatternlenA, divpatternA, divpatternlenA) = genTiledInputPattern tileA unrollA params
+    let (inputpatternB, inputpatternstepB, inputpatternlenB, divpatternB, divpatternlenB) = genTiledInputPattern tileB unrollB params
+    let (inputpatternC, inputpatternstepC, inputpatternlenC, divpatternC, divpatternlenC) = genTiledInputPattern tileC unrollC params
+    let (inputpatternD, inputpatternstepD, inputpatternlenD, divpatternD, divpatternlenD) = genTiledInputPattern tileD unrollD params
+
+    let mut inputpatternABCD = tensor((inputpatternlenA + inputpatternlenB + inputpatternlenC + inputpatternlenD,), 0i32)
+    let mut divpatternABCD = tensor((divpatternlenA + divpatternlenB + divpatternlenC + divpatternlenD,), 0i32)
+    let _ = if (inputpatternlenD > 0){ // A, B, C, D
+        inputpatternABCD[(0:inputpatternlenA:1,)] <- inputpatternA
+        inputpatternABCD[(inputpatternlenA:inputpatternlenA + inputpatternlenB:1,)] <- inputpatternB
+        inputpatternABCD[(inputpatternlenA + inputpatternlenB:inputpatternlenA + inputpatternlenB + inputpatternlenC:1,)] <- inputpatternC
+        inputpatternABCD[(inputpatternlenA + inputpatternlenB + inputpatternlenC:inputpatternlenA + inputpatternlenB + inputpatternlenC + inputpatternlenD:1,)] <- inputpatternD
+
+        divpatternABCD[(0:divpatternlenA:1,)] <- divpatternA
+        divpatternABCD[(divpatternlenA:divpatternlenA + divpatternlenB:1,)] <- divpatternB
+        divpatternABCD[(divpatternlenA + divpatternlenB:divpatternlenA + divpatternlenB + divpatternlenC:1,)] <- divpatternC
+        divpatternABCD[(divpatternlenA + divpatternlenB + divpatternlenC:divpatternlenA + divpatternlenB + divpatternlenC + divpatternlenD:1,)] <- divpatternD
+        0
+    } else if (inputpatternlenC > 0){ // A, C
+        inputpatternABCD[(0:inputpatternlenA:1,)] <- inputpatternA
+        inputpatternABCD[(inputpatternlenA:inputpatternlenA + inputpatternlenC:1,)] <- inputpatternC
+        divpatternABCD[(0:divpatternlenA:1,)] <- divpatternA
+        divpatternABCD[(divpatternlenA:divpatternlenA + divpatternlenC:1,)] <- divpatternC
+        0
+    } else if (inputpatternlenB > 0){ // A, B
+        inputpatternABCD[(0:inputpatternlenA:1,)] <- inputpatternA
+        inputpatternABCD[(inputpatternlenA:inputpatternlenA + inputpatternlenB:1,)] <- inputpatternB
+        divpatternABCD[(0:divpatternlenA:1,)] <- divpatternA
+        divpatternABCD[(divpatternlenA:divpatternlenA + divpatternlenB:1,)] <- divpatternB
+        0
+    } else{ // A
+        inputpatternABCD[(0:inputpatternlenA:1,)] <- inputpatternA
+        divpatternABCD[(0:divpatternlenA:1,)] <- divpatternA
+        0
+    }
+
+    (inputpatternABCD, 
+    [inputpatternstepA; inputpatternstepB; inputpatternstepC; inputpatternstepD], 
+    [inputpatternlenA; inputpatternlenB; inputpatternlenC; inputpatternlenD], 
+    [0; inputpatternlenA; inputpatternlenA + inputpatternlenB; inputpatternlenA + inputpatternlenB + inputpatternlenC],
+    divpatternABCD, 
+    [divpatternlenA; divpatternlenB; divpatternlenC; divpatternlenD], 
+    [0; divpatternlenA; divpatternlenA + divpatternlenB; divpatternlenA + divpatternlenB + divpatternlenC],
+    [(tileA[|0|], tileA[|2|]); (tileB[|0|], tileB[|2|]); (tileC[|0|], tileC[|2|]); (tileD[|0|], tileD[|2|])], 
+    [(tileA[|1|], tileA[|3|]); (tileB[|1|], tileB[|3|]); (tileC[|1|], tileC[|3|]); (tileD[|1|], tileD[|3|])], 
+    [unrollA[|0|]; unrollB[|0|]; unrollC[|0|]; unrollD[|0|]],
+    [unrollA[|1|]; unrollB[|1|]; unrollC[|1|]; unrollD[|1|]])
+
+// let modifyOutputZeroPoints params =
+//     if(ut.isQuant (params->weight)){
+//         if(params->pooltype == "maxpool2d"){
+            
+//         } else{
+//             params->output_zero_points
+//         }
+//     } else{
+//         params->output_zero_points
+//     }
+
+let prepareChannelPackAndUnroll params = 
+    let (_, inrows, incols, inch) = params->input_shape
+    let (_, outrows, outcols, outch) = params->output_shape
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = params->unroll
+    let (packinch, packoutch) = params->pack
+    let (weightrows, weightcols) = params->pool_size
+    let stride = params->stride
+    let padding = params->padding
+    
+    let rec tilechannel start channel pack unroll =
+        let subch = (channel - start) % (pack * unroll)
+        let end = channel - subch
+        let out = ([(start, end)], [pack], [unroll])
+        if (subch == 0){
+            out
+        } else if(subch % pack == 0){
+            let nextunroll = subch / pack
+            let nextout = tilechannel end channel pack nextunroll
+            (ll.concat (out[|0|]) (nextout[|0|]), ll.concat (out[|1|]) (nextout[|1|]), ll.concat (out[|2|]) (nextout[|2|]))
+        } else if(subch < pack){
+            let nextpack = subch
+            let nextunroll = 1
+            let nextout = tilechannel end channel nextpack nextunroll
+            (ll.concat (out[|0|]) (nextout[|0|]), ll.concat (out[|1|]) (nextout[|1|]), ll.concat (out[|2|]) (nextout[|2|]))
+        } else{
+            let nextunroll = subch / pack
+            let nextout = tilechannel end channel pack nextunroll
+            (ll.concat (out[|0|]) (nextout[|0|]), ll.concat (out[|1|]) (nextout[|1|]), ll.concat (out[|2|]) (nextout[|2|]))
+        }
+
+    let (tileoutchs, packoutchs, unrolloutchs) = tilechannel 0 outch packoutch unrolloutch
+
+    (tileoutchs, packoutchs, unrolloutchs)
+
+let prepareDivPattern params =
+    let (_, inrows, incols, inch) = params->input_shape
+    let (_, outrows, outcols, outch) = params->output_shape
+    let (weightrows, weightcols) = params->pool_size
+    let (striderow, stridecol) = params->stride
+    let (dilationrow, dilationcol) = params->dilation
+    let (padt, padb, padl, padr) = params->padding
+
+    if(params->pooltype == "avgpool2d"){
+        let divpatternlen = outrows * outcols
+
+        let mut offsetdiv = 0i
+        let mut divpattern = tensor((divpatternlen,), 0i32)
+        for (i from 0 to outrows step 1){
+            for (j from 0 to outcols step 1){
+                let mut div = 0
+                for (si from 0 to weightrows){
+                    for (sj from 0 to weightcols){
+                        let ii = -padt + striderow * (i) + dilationrow * si
+                        let jj = -padl + stridecol * (j) + dilationcol * sj
+                        let _ = if ((ii >= 0) && (ii <= inrows - 1) && (jj >= 0) && (jj <= incols - 1)){
+                            div <- div + 1
+                            _end_
+                        } else{
+                            _end_
+                        }
+                    }
+                }
+                divpattern[(offsetdiv,)] <- div
+                offsetdiv <- offsetdiv + 1
+            }
+        }
+        divpattern
+    } else{
+        tensor((1,), 0i32)
+    }
+type TemplateParameters = {attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t_list: ll.List<rtType>, output_t_list: ll.List<rtType>}
+
+type InternalParameters = {pooltype : str, pool_size : tuple<i32, i32>, stride : tuple<i32, i32>, padding : tuple<i32, i32, i32, i32>, dilation : tuple<i32, i32>,
+    input_t : rtType, input_dtype : rtType, input_shape : tuple<i32, i32, i32, i32>, input_scales : ut.UnionTensor, input_zero_points : ut.UnionTensor,
+    output_t : rtType, output_dtype : rtType, output_shape : tuple<i32, i32, i32, i32>, output_scales : ut.UnionTensor, output_zero_points : ut.UnionTensor,
+    weight: ut.UnionTensor,
+    framework : string, nchw : bool, pack : tuple<i32, i32>, unroll : tuple<i32, i32, i32, i32>}
+
+type CodeGenParameters = {
+    attr_params: params.Attributes,
+    isQuant: bool,
+    mult: ut.UnionTensor, shift : ut.UnionTensor, input_zero_points : ut.UnionTensor, output_zero_points : ut.UnionTensor,
+    pooltype : str, pool_size : tuple<i32, i32>, stride : tuple<i32>, padding : tuple<i32>, nchw : bool,
+    pack : tuple<i32, i32>, unroll : tuple<i32, i32, i32, i32>,
+    input_dtype : rtType, input_shape : tuple<i32>, output_dtype : rtType, output_shape : tuple<i32>, weight : ut.UnionTensor,
+    inputpatterns : tensor<i32, 1>, inputpatternsteps : ll.List, inputpatternlens : ll.List, inputpatternoffsets : list,
+    divpatterns : tensor<i32, 1>, divpatternlens : ll.List, divpatternoffsets : list,
+    tileoutrows : ll.List, tileoutcols : ll.List, unrolloutrows : ll.List, unrolloutcols : ll.List,
+    tileoutchs : ll.List, packoutchs : ll.List, unrolloutchs : ll.List,
+    iternamebatch : str, iternameoutch : str, iternameinputpattern : str, iternameinputpatternsub : str,
+    prefixinput : str, prefixoutput : str, prefixsum : str, prefixinputpattern : str, prefixinputpatternidx : str, prefixinputidx : str, prefixinputsubview : str, prefixdiv : str, prefixmult : str, prefixshift : str,
+    nameinputzeropoints : str, nameoutputzeropoints : str, nameinputpattern : str, namedivpattern : str, namebatchinput : str, namebatchoutput : str, nameinput : str, nameoutput : str, namemult : str, nameshift : str, namepad : str,
+    setvarsimpls : ll.List, premicroopsimpls: ll.List, postmicroopsimpls : ll.List, inputpadopsimpls: ll.List, outputpadopsimpls: ll.List, loopopsimpls : ll.List,
+}
+
+let initCodeGen templateparams params = 
+    let (setvarsimpls, premicroopsimpls, postmicroopsimpls, inputpadopsimpls, outputpadopsimpls, loopopsimpls) = fsn.init (templateparams->layer_params) (templateparams->input_data) (templateparams->input_dtypes) (templateparams->input_shapes) (templateparams->input_scales) (templateparams->input_zero_points) (templateparams->output_dtypes) (templateparams->output_shapes) (templateparams->output_scales) (templateparams->output_zero_points) (templateparams->input_edges) (templateparams->output_edges) (templateparams->ismainops)
+
+    let (mult, shift) = prepareMultShift params
+    let (inputpatterns, inputpatternsteps, inputpatternlens, inputpatternoffsets, _, divpatternlens, divpatternoffsets, tileoutrows, tileoutcols, unrolloutrows, unrolloutcols) = prepareInputPattern params inputpadopsimpls outputpadopsimpls
+    let divpatterns = prepareDivPattern params
+    let (tileoutchs, packoutchs, unrolloutchs) = prepareChannelPackAndUnroll params
+
+    let codeGenParameters = 
+        CodeGenParameters(
+            templateparams->attr_params,
+            ut.isQuant (params->weight),
+            mult, shift, params->input_zero_points, params->output_zero_points,
+            params->pooltype, params->pool_size, params->stride, params->padding, params->nchw,
+            params->pack, params->unroll, params->input_dtype, params->input_shape, params->output_dtype, params->output_shape, params->weight,
+            inputpatterns, inputpatternsteps, inputpatternlens, inputpatternoffsets, 
+            divpatterns, divpatternlens, divpatternoffsets, 
+            tileoutrows, tileoutcols, unrolloutrows, unrolloutcols,
+            tileoutchs, packoutchs, unrolloutchs,
+            "b", "q", "ip", "ips", "i", "o", "acc", "ip", "ipidx", "iidx", "isub", "div", "m", "sh", "inputzero", "outputzero", "inputpattern", "divpattern", "batchinput", "batchoutput", "input", "output", "mult", "shift", "pad",
+            setvarsimpls, premicroopsimpls, postmicroopsimpls, inputpadopsimpls, outputpadopsimpls, loopopsimpls,
+        )
+
+    codeGenParameters
+
+///////////////////////////////////////////////////////
+///////////     runtime expr gen codes     ////////////
+///////////////////////////////////////////////////////
+type IndexesKeys =
+    | Inputpattern
+    | Outrow
+    | Outcol
+    | Inch
+    | Outch
+    | Weightrow
+    | Weightcol
+
+    
+type Indexes = {inputpattern : i32, inch : i32, outch : i32}
+
+let updateIndexes idxs key val = 
+    match key with
+        | Inputpattern   -> Indexes(val, idxs->inch, idxs->outch)
+        | Inch           -> Indexes(idxs->inputpattern, val, idxs->outch)
+        | Outch          -> Indexes(idxs->inputpattern, idxs->inch, val)
+
+type UnrollIndexes = {outrow : i32, outcol : i32, inch : i32, outch : i32, weightrow : i32, weightcol : i32}
+
+let updateUnrollIndexes idxs key val = 
+    match key with
+        | Outrow    -> UnrollIndexes(val, idxs->outcol, idxs->inch, idxs->outch, idxs->weightrow, idxs->weightcol)
+        | Outcol    -> UnrollIndexes(idxs->outrow, val, idxs->inch, idxs->outch, idxs->weightrow, idxs->weightcol)
+        | Inch      -> UnrollIndexes(idxs->outrow, idxs->outcol, val, idxs->outch, idxs->weightrow, idxs->weightcol)
+        | Outch     -> UnrollIndexes(idxs->outrow, idxs->outcol, idxs->inch, val, idxs->weightrow, idxs->weightcol)
+        | Weightrow -> UnrollIndexes(idxs->outrow, idxs->outcol, idxs->inch, idxs->outch, val, idxs->weightcol)
+        | Weightcol -> UnrollIndexes(idxs->outrow, idxs->outcol, idxs->inch, idxs->outch, idxs->weightrow, val)
+
+type Optree<a> =
+    | End of a
+    | Op of a * Optree<a>
+    | Block of a * Optree<a> * Optree<a>
+
+let getop optree = 
+    match optree with
+    | End(op)                       -> (op, op)
+    | Op(op, nextop)                -> (op, nextop)
+    | Block(op, innerop, nextop)    -> (op, Op(innerop, nextop))
+
+let getblock optree =
+    let (innerops, nextops) = getop optree
+    let (innerop, inneropsnew) = getop innerops
+    let (nextop, nextopsnew) = getop nextops
+    (innerop, inneropsnew, nextop, nextopsnew)
+
+type VarNames = 
+    | Input
+    | Weight
+    | Weightidx
+    | Output
+    | Sum
+    | Inputpattern
+    | Inputpatternidx
+    | Inputpatternidx2
+    | Inputidx
+    | Inputidx2
+    | Inputsubview
+    | Divpatternidx
+    | Div
+    | Mult
+    | Shift
+
+let getVarName target uidxs params idxs = 
+    match target with
+        | Input             -> params->prefixinput + toStr(ll.item (idxs->outch) (params->packoutchs)) + "x" + ut.dtypeStr(params->weight) + "u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) + toStr(uidxs->inch) + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Weight            -> params->prefixweight + toStr(ll.item (idxs->outch) (params->packoutchs)) + "x" + ut.dtypeStr(params->packedweight)
+        | Weightidx         -> params->prefixweightidx
+        | Sum               -> params->prefixsum + toStr(ll.item (idxs->outch) (params->packoutchs)) + "x" + ut.dtypeStr(params->weight) + "u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) + toStr(uidxs->outch) 
+        | Inputpattern      -> params->prefixinputpattern + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Inputpatternidx   -> params->prefixinputpatternidx + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) // + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Inputpatternidx2  -> params->prefixinputpatternidx + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) + toStr(uidxs->weightrow) + toStr(uidxs->weightcol) // + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Inputidx          -> params->prefixinputidx + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol) // + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Inputidx2         -> params->prefixinputidx + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol)  + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)// + toStr(uidxs->weightrow) + toStr(uidxs->weightcol)
+        | Inputsubview      -> params->prefixinputsubview + toStr(params->input_shape[|3|])+ "x" + ut.dtypeStr(params->weight) + "u" + toStr(uidxs->outrow) + toStr(uidxs->outcol)
+        | Divpatternidx     -> params->prefixdiv + "idx" + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol)
+        | Div               -> params->prefixdiv + "1u" + toStr(uidxs->outrow) + toStr(uidxs->outcol)
+        | Mult              -> params->prefixmult + toStr(ll.item (idxs->outch) (params->packoutchs)) + "x" + ut.dtypeStr(params->mult) + "u" + toStr(uidxs->outch) 
+        | Shift             -> params->prefixshift + toStr(ll.item (idxs->outch) (params->packoutchs)) + "x" + ut.dtypeStr(params->shift) + "u" + toStr(uidxs->outch) 
+
+let getUnrolls params idxs =
+    (ll.item (idxs->inputpattern) (params->unrolloutrows), ll.item (idxs->inputpattern) (params->unrolloutcols), 0, ll.item (idxs->outch) (params->unrolloutchs))
+
+let genRuntimeCode params idxs ops =
+    match ops with
+    | End(op)                       -> op params idxs ops
+    | Op(op, nextop)                -> op params idxs nextop
+    | Block(op, innerop, nextop)    -> op params idxs (Op(innerop, nextop))
+
+let endExpr params idxs ops =
+    !{
+        // let ${"debugMessageEnd"} = ${toStr(idxs)}
+        _end_
+    }
+
+let zeroExpr params idxs ops =
+    !{0}
+
+let setBatchInputOutputExpr params idxs ops = 
+    let (nextop, opsnew) = getop(ops)
+    let namebatchinput = params->namebatchinput
+    let namebatchoutput = params->namebatchoutput
+    let (batch, inrows, incols, inch) = params->input_shape
+    let (_, outrows, outcols, outch) = params->output_shape
+    // !{
+    //     let mut ${namebatchoutput} = reshapeTo((${batch * outrows * outcols * outch},), &outputs[|0|])
+    //     let mut ${namebatchinput} = reshapeTo((${(batch + 1) * inrows * incols * inch},), inputs[|0|])
+    //     ${nextop params idxs opsnew}
+    // }
+    let loopopsimpls = params->loopopsimpls
+    let outputnames = ["outputs"]
+    let loopopsexpr = fsn.genLoopOpsExpr loopopsimpls outputnames
+
+    let setvarsimpls = params->setvarsimpls
+    let batchinputnames = [namebatchinput; ""; ""]
+    let batchoutputnames = [namebatchoutput]
+    let inputshapes = [ [(batch + 1) * inrows * incols * inch]; [0]; [0] ]
+    let outputshapes = [ [batch * outrows * outcols * outch] ]
+    let ismutinputs = [true; false; false]
+    loopopsexpr (fsn.genSetVarsExpr setvarsimpls batchinputnames batchoutputnames inputshapes outputshapes ismutinputs (nextop params idxs opsnew))
+
+let setZeropointsExpr params idxs ops =
+    let (nextop, opsnew) = getop(ops)
+    let nameinputzeropoints = params->nameinputzeropoints
+    let nameoutputzeropoints = params->nameoutputzeropoints
+    let inputzero = params->input_zero_points
+    let outputzero = params->output_zero_points
+    if(params->isQuant){
+        !{
+            let ${nameinputzeropoints} = ${ut.toRtTensor inputzero}
+            let ${nameoutputzeropoints} = ${ut.toRtTensor outputzero}
+            ${nextop params idxs opsnew}
+        }
+    } else{
+        !{
+            ${nextop params idxs opsnew}
+        }
+    }
+
+let setInputpatternExpr params idxs ops =
+    let (nextop, opsnew) = getop(ops)
+    let nameinputpattern = params->nameinputpattern
+    let inputpatterns = params->inputpatterns
+    let namedivpattern = params->namedivpattern
+    let divpatterns = params->divpatterns
+
+    if(params->pooltype == "avgpool2d"){
+        let divpatternexpr = 
+            match params->weight with
+                | ut.TensorI8 t     -> !{${divpatterns}} 
+                | ut.TensorF16 t    -> !{${tensor((1,), 1.f16) / cast<f16>(divpatterns)}}
+                | ut.TensorF32 t    -> !{${tensor((1,), 1.f32) / cast<f32>(divpatterns)}}
+        !{
+            let ${nameinputpattern} = ${inputpatterns}
+            let ${namedivpattern} = ${divpatternexpr}
+            ${nextop params idxs opsnew}
+        }
+    } else{
+        !{
+            let ${nameinputpattern} = ${inputpatterns}
+            ${nextop params idxs opsnew}
+        }
+    }
+
+let setMultShiftExpr params idxs ops = 
+    let (nextop, opsnew) = getop(ops)
+    let namemult = params->namemult
+    let nameshift = params->nameshift
+
+    if(params->isQuant){
+        !{
+            let ${namemult} = ${ut.toRtTensor (params->mult)}
+            let ${nameshift} = ${ut.toRtTensor (params->shift)}
+            ${nextop params idxs opsnew}
+        }
+    } else{
+        !{
+            ${nextop params idxs opsnew}
+        }
+    }
+
+let setPadExpr params idxs ops = 
+    let (nextop, opsnew) = getop(ops)
+    let namepad = params->namepad
+    let namebatchinput = params->namebatchinput
+    let (batch, inrows, incols, inch) = params->input_shape
+    let inputpadopsimpls = params->inputpadopsimpls
+    let (_, input_shape) = fsn.padOps inputpadopsimpls ([[0; 0]; [0;0]; [0;0]; [0; 0]]) ([batch; inrows; incols; inch])
+    // let padstart = batch * inrows * incols * inch
+    let padstart = (ll.item 0 input_shape) * (ll.item 1 input_shape) * (ll.item 2 input_shape) * (ll.item 3 input_shape)
+    let valpad = 
+        match params->weight with
+            | ut.TensorI8 t     ->
+                match params->input_zero_points with
+                    | ut.TensorI32 t    -> !{${cast<i8>(t[(0,)])}}
+                    | _                 -> except("An error occured while setting padExpr")
+            | ut.TensorF16 t    -> !{0.f16}
+            | ut.TensorF32 t    -> !{0.f32}
+    !{
+        // let mut ${namebatchinput} = reshapeTo((${(batch + 1) * inrows * incols * inch},), inputs[|0|]) // for layer_ct
+        ${namebatchinput}[(${padstart}:${padstart + inch}:1,)] <- tensor((${inch},), ${valpad})
+        ${nextop params idxs opsnew}
+    }
+
+let setIternameInput params idxs ops = 
+    if(params->depthwise){
+        let (nextop, opsnew) = getop(ops)
+        let iternameinch = params->iternameinch
+        let iternameoutch = params->iternameoutch
+        let groups = params->groups
+
+        !{
+            let ${iternameinch} = ${iternameoutch} / ${groups}
+            ${nextop params idxs opsnew}
+        }
+    } else{
+        except("setiternameinput error")
+    }
+
+let weightLoopExpr params idxs ops =
+    let (innerop, inneropsnew, nextop, nextopsnew) = getblock ops
+    let (weightrows, weightcols) = params->pool_size
+    !{
+        for(${params->iternameinputpatternsub} from 0 to ${weightrows * weightcols}){
+            ${innerop params idxs inneropsnew}
+        }
+        ${nextop params idxs nextopsnew}
+    }
+
+// // input pattern loop expression
+// let inputPatternLoopExpr params idxs ops = 
+//     let genInputPatternLoopExpr index params idxs ops = 
+//         let (innerop, inneropsnew, nextop, nextopsnew) = getblock ops
+
+//         let itername = params->iternameinputpattern
+//         let inputpatternsteps = params->inputpatternsteps
+//         let inputpatternlens = params->inputpatternlens
+//         let inputpatternstep = ll.item index inputpatternsteps
+//         let inputpatternlen = ll.item index inputpatternlens
+//         let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+//         !{
+//             for (${itername} from ${offset} to ${offset + inputpatternlen} step ${inputpatternstep}){
+//                 ${innerop params idxs inneropsnew}
+//             }
+//             ${nextop params idxs nextopsnew}
+//         }
+    
+//     genInputPatternLoopExpr 0 params idxs ops
+
+// Tiled input channel loop expression
+let tiledInputPatternLoopExpr params idxs ops = 
+    let rec genTiledInputPatternLoopExpr index params idxs ops =
+        let (innerop, inneropsnew, nextop, nextopsnew) = getblock ops
+        if (index == 4){
+            nextop params idxs nextopsnew
+        } else{
+            let itername = params->iternameinputpattern
+            let inputpatternsteps = params->inputpatternsteps
+            let inputpatternlens = params->inputpatternlens
+            let inputpatternstep = ll.item index inputpatternsteps
+            let inputpatternlen = ll.item index inputpatternlens
+            let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+            let idxsnew = updateIndexes idxs Inputpattern (index + 1)
+
+            if (inputpatternlen > 0){
+                !{
+                    attr [ Parallel: (params->attr_params->num_threads > 1) ]
+                    for (${itername} from ${offset} to ${offset + inputpatternlen} step ${inputpatternstep}){
+                        ${innerop params idxs inneropsnew}
+                    }
+                    ${genTiledInputPatternLoopExpr (index + 1) params idxsnew ops}
+                }
+            } else{
+                !{
+                    ${genTiledInputPatternLoopExpr (index + 1) params idxsnew ops}
+                }
+            }
+        }
+    
+    genTiledInputPatternLoopExpr 0 params idxs ops
+
+/// Tiled channel loop expression
+// generate tiled input or output channel loop
+// target: 0 (input), 1 (output)
+// params->iternameinchs/outchs : string, itername
+// params->packinchs/outchs : tuple<i32>, packing parameters 
+// params->unrollinchs/outchs : tuple<i32>, unrolling parameters
+// params->loopinchs/outchs : tuple<tuple<i32>>, loop parameters, (start, end)
+// number of element in pack, unroll and loop should be same
+// idxs->inchidx/outchidx : i32, index to select parameter
+let rec genTiledChannelLoopExpr index target params idxs ops = 
+    let (innerop, inneropsnew, nextop, nextopsnew) = getblock ops
+    let tilelen = if(target == 0){ll.len (params->tileinchs)} else{ll.len (params->tileoutchs)}
+    if (index == tilelen){
+        let idxsnew = if(target == 0){
+            updateIndexes idxs Inch 0
+        } else{
+            updateIndexes idxs Outch 0
+        }
+        nextop params idxsnew nextopsnew
+    } else{
+        let (idxsnew, pack, unroll, (start, end), itername) = if(target == 0){
+                let subidx = idxs->inch
+                let idxsnew = updateIndexes idxs Inch (index + 1)
+                let (_, _, _, inch) = params->input_shape
+                (idxsnew, ll.item subidx (params->packinchs), ll.item subidx (params->unrollinchs), ll.item subidx (params->tileinchs), params->iternameinch)
+            } else{
+                let subidx = idxs->outch
+                let idxsnew = updateIndexes idxs Outch (index + 1)
+                let (_, _, _, outch) = params->output_shape
+                (idxsnew, ll.item subidx (params->packoutchs), ll.item subidx (params->unrolloutchs), ll.item subidx (params->tileoutchs), params->iternameoutch)
+            }
+        !{
+            for(${itername} from ${start} to ${end} step ${pack * unroll}){
+                ${innerop params idxs inneropsnew}
+            }
+            ${genTiledChannelLoopExpr (index + 1) target params idxsnew ops}
+        }
+    }
+
+let tiledInputChannelLoopExpr params idxs ops = 
+    genTiledChannelLoopExpr 0 0 params idxs ops
+
+let tiledOutputChannelLoopExpr params idxs ops = 
+    genTiledChannelLoopExpr 0 1 params idxs ops
+
+let batchLoopExpr params idxs ops = 
+    let (innerop, inneropsnew, nextop, nextopsnew) = getblock ops
+    let itername = params->iternamebatch
+    let (nextop, opsnew) = getop ops
+    let (batch, inh, inw, inch) = params->input_shape
+    let (_, outh, outw, outch) = params->output_shape
+    let inputoffset = inh * inw * inch
+    let outputoffset = outh * outw * outch
+    let batchinputname = params->namebatchinput
+    let batchoutputname = params->namebatchoutput
+    let inputname = params->nameinput
+    let outputname = params->nameoutput
+    let iternamebatch = params->iternamebatch
+    if (batch == 1){
+        !{
+            let mut ${inputname} = &${batchinputname}
+            let mut ${outputname} = &${batchoutputname}
+            let _ = (
+                ${innerop params idxs inneropsnew}
+            )
+
+            ${nextop params idxs nextopsnew}
+        }
+    } else{
+        !{
+            for(${itername} from 0 to batch step 1i){
+                let mut ${inputname} = &${batchinputname}[(${iternamebatch} * ${inh * inw * inch}:${(batch + 1) * inh * inw * inch}:1,)]
+                let mut ${outputname} = &${batchoutputname}[(${iternamebatch} * ${outputoffset}:(${iternamebatch} + 1) * ${outputoffset}:1,)]
+                ${innerop params idxs inneropsnew}
+            }
+            ${nextop params idxs nextopsnew}
+        }
+    }
+
+// Load sum expression
+let unrolledLoadSumExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+
+    let rec genExpr index uidxs =
+        let sumname = getVarName Sum uidxs params idxs
+        let (rowidx, colidx, inchidx, outchidx) = (uidxs->outrow, uidxs->outcol, 0, uidxs->outch)
+        let sumname00 = getVarName Sum (UnrollIndexes(0, 0, inchidx, outchidx, 0, 0)) params idxs
+        if (index == unrollrow * unrollcol * unrolloutch) {
+            let (nextop, opsnew) = getop ops
+            nextop params idxs opsnew
+        } else{
+            let (rowidxnew, colidxnew, outchidxnew) =
+                if ((colidx + 1 == unrollcol) && (outchidx + 1 == unrolloutch)){
+                    (rowidx + 1, 0, 0)
+                } else if (outchidx + 1 == unrolloutch) {
+                    (rowidx, colidx + 1, 0)
+                } else{
+                    (rowidx, colidx, outchidx + 1)
+                }
+            let sumexpr = 
+                if(params->pooltype == "avgpool2d"){
+                    if(ut.isQuant (params->weight)){
+                        !{tensor((${packoutch},), 0i32)}
+                    } else{
+                        match params->weight with
+                            | ut.TensorF16 t -> !{tensor((${packoutch},), 0.f16)}
+                            | ut.TensorF32 t -> !{tensor((${packoutch},), 0.f32)}
+                    }
+                } else if(params->pooltype == "maxpool2d"){
+                    if(ut.isQuant (params->weight)){
+                        !{tensor((${packoutch},), ${cast<i8>(-128)})}
+                    } else{
+                        match params->weight with
+                            | ut.TensorF16 t -> !{tensor((${packoutch},), cast<f16>(-inf))}
+                            | ut.TensorF32 t -> !{tensor((${packoutch},), cast<f32>(-inf))}
+                    }
+                }
+            // !{
+            //     let mut ${sumname} = ${sumexpr}
+            //     ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidx, outchidxnew, 0, 0))}
+            // }
+            if(rowidx == 0 && colidx == 0){
+                !{
+                    let mut ${sumname} = ${sumexpr}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidx, outchidxnew, 0, 0))}
+                }
+            } else{
+                !{
+                    let mut ${sumname} = ${sumname00}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidx, outchidxnew, 0, 0))}
+                }
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+let unrolledSetInputpatternidxExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (weightrows, weightcols) = params->pool_size
+    let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+    let (batch, _, _, _) = params->input_shape
+
+    let rec genExpr index uidxs =
+        let ipidxname = getVarName Inputpatternidx uidxs params idxs
+        let (rowidx, colidx, inchidx, outchidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch)
+        if (index == unrollrow * unrollcol) {
+            let (nextop, opsnew) = getop ops
+            nextop params idxs opsnew
+        } else{
+            let (rowidxnew, colidxnew) =
+                if ((colidx + 1 == unrollcol)){
+                    (rowidx + 1, 0)
+                } else{
+                    (rowidx, colidx + 1)
+                }
+            if(batch == 1){
+                !{
+                    let mut ${ipidxname} = ${params->iternameinputpattern} + ${(weightrows * weightcols + 1) * colidx + (weightrows * weightcols + 1) * unrollcol * rowidx}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+                }
+            } else{
+                !{
+                    let mut ${ipidxname} = ${params->iternameinputpattern} + ${(weightrows * weightcols + 1) * colidx + (weightrows * weightcols + 1) * unrollcol * rowidx}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+                }
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+let unrolledSetInputidxAndDivExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (weightrows, weightcols) = params->pool_size
+    let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+    let nameinputpattern = params->nameinputpattern
+    let (batch, inh, inw, inch) = params->input_shape
+    let (_, _, _, outch) = params->output_shape
+    let (striderow, stridecol) = params->stride
+
+    let rec genExpr index uidxs =
+        let ipidxname = getVarName Inputpatternidx2 uidxs params idxs
+        let iidxname = getVarName Inputidx2 uidxs params idxs
+        let divname = getVarName Div uidxs params idxs
+        let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+        let iidxname00 = getVarName Inputidx2 (UnrollIndexes(rowidx, colidx, inchidx, outchidx, 0, 0)) params idxs
+        // let dividxname = iidxname00 + toStr(idxs->outch)
+        let dividxname = iidxname + "div"
+        if (index == weightrows * weightcols + 1) {
+            let (nextop, opsnew) = getop ops
+            !{
+                ${nextop params idxs opsnew}
+            }
+        } else{
+            let (rowidxnew, colidxnew, wrowidxnew, wcolidxnew) =
+                if ((wcolidx + 1 == weightcols)){
+                    (0, 0, wrowidx + 1, 0)
+                } else{
+                    (0, 0, wrowidx, wcolidx + 1)
+                }
+            let inputpatternexpr = 
+                if(batch == 1){
+                    !{${nameinputpattern}[(${params->iternameinputpattern} + ${weightrows * wrowidx + wcolidx},)]}
+                } else{
+                    if(index == weightrows * weightcols){ // output
+                        !{${nameinputpattern}[(${params->iternameinputpattern} + ${weightrows * wrowidx + wcolidx},)]}
+                    } else{
+                        !{__min(${nameinputpattern}[(${params->iternameinputpattern} + ${weightrows * wrowidx + wcolidx},)], ${batch * inh * inw * inch})}
+                    }
+                }
+            if((index == weightrows * weightcols) && (params->pooltype == "avgpool2d")){
+                !{
+                    let ${iidxname} = ${inputpatternexpr}
+                    let ${dividxname} = ${iidxname} / ${outch}
+                    let ${divname} = ${params->namedivpattern}[(${dividxname}:${dividxname} + 1:1,)]
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, wrowidxnew, wcolidxnew))}
+                }
+            } else{
+                !{
+                    let ${iidxname} = ${inputpatternexpr}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, wrowidxnew, wcolidxnew))}
+                }
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+
+let unrolledSetDivExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (weightrows, weightcols) = params->pool_size
+    let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+
+    let rec genExpr index uidxs =
+        let divname = getVarName Div uidxs params idxs
+        let (rowidx, colidx, inchidx, outchidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch)
+        if (index == unrollrow * unrollcol) {
+            let (nextop, opsnew) = getop ops
+            nextop params idxs opsnew
+        } else{
+            let (rowidxnew, colidxnew) =
+                if ((colidx + 1 == unrollcol)){
+                    (rowidx + 1, 0)
+                } else{
+                    (rowidx, colidx + 1)
+                }
+            let divexpr = 
+                if(params->isQuant){
+                    !{tensor((1,), 0i32)}
+                } else{
+                    match params->weight with
+                        | ut.TensorF16 t -> !{tensor((1,), 0.f16)}
+                        | ut.TensorF32 t -> !{tensor((1,), 0.f32)}
+                }
+            !{
+                // let mut ${divname} = ${divexpr} 
+                ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+let unrolledUpdateInputpatternidxExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (weightrows, weightcols) = params->pool_size
+    let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+
+    let rec genExpr index uidxs =
+        let ipidxname = getVarName Inputpatternidx uidxs params idxs
+        let (rowidx, colidx, inchidx, outchidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch)
+        if (index == unrollrow * unrollcol) {
+            let (nextop, opsnew) = getop ops
+            nextop params idxs opsnew
+        } else{
+            let (rowidxnew, colidxnew) =
+                if ((colidx + 1 == unrollcol)){
+                    (rowidx + 1, 0)
+                } else{
+                    (rowidx, colidx + 1)
+                }
+            !{
+                ${ipidxname} <- ${ipidxname} + 1
+                ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+let unrolledInputSubviewExpr params idxs ops =
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (weightrows, weightcols) = params->pool_size
+    let offset = ll.item (idxs->inputpattern) (params->inputpatternoffsets)
+    // let (inchstart, inchend) = ll.item (idxs->inch) (params->tileinchs)
+    let (outchstart, outchend) = ll.item (idxs->outch) (params->tileoutchs)
+    let (b, h, w, inch) = params->input_shape
+    let inputlength = h * w * inch
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+    
+
+    let rec genExpr index uidxs =
+        let ipidxname = getVarName Inputpatternidx uidxs params idxs
+        let inputpatternname = params->nameinputpattern
+        let inputidxname = getVarName Inputidx uidxs params idxs
+        let isubviewname = getVarName Inputsubview uidxs params idxs
+        let divname = getVarName Div uidxs params idxs
+        let padname = params->namepad
+        let inputname = params->nameinput
+        let (rowidx, colidx, inchidx, outchidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch)
+        if (index == unrollrow * unrollcol) {
+            let (nextop, opsnew) = getop ops
+            nextop params idxs opsnew
+        } else{
+            let (rowidxnew, colidxnew) =
+                if ((colidx + 1 == unrollcol)){
+                    (rowidx + 1, 0)
+                } else{
+                    (rowidx, colidx + 1)
+                }
+            if(params->pooltype == "avgpool2d"){
+                let iidxexpr =
+                    if(b > 1){
+                        !{__min(${b * h * w * inch}, ${inputpatternname}[(${ipidxname},)])}
+                    } else{
+                        !{${inputpatternname}[(${ipidxname},)]}
+                    }
+
+                let count =
+                    match params->weight with
+                        | ut.TensorI8 t    -> !{tensor((1,), cast<i8>(${inputidxname} < ${h * w * inch}))}
+                        | ut.TensorF16 t   -> !{tensor((1,), cast<f16>(cast<i32>(${inputidxname} < ${h * w * inch})))}
+                        | ut.TensorF32 t   -> !{tensor((1,), cast<f32>(cast<i32>(${inputidxname} < ${h * w * inch})))}
+                
+                let isubviewexpr = 
+                    if(params->isQuant){
+                        !{cast<i32>(${inputname}[(${inputidxname}:${inputidxname} + ${outchend}:1,)])}
+                    } else{
+                        !{${inputname}[(${inputidxname}:${inputidxname} + ${outchend}:1,)]}
+                    }
+                !{
+                    let ${inputidxname} = ${iidxexpr}
+                    // let ${isubviewname} = ${isubviewexpr}
+                    // ${divname} <- ${divname} + ${count}
+                            
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+                }
+            } else if(params->pooltype == "maxpool2d"){
+                let iidxexpr =
+                    if(b > 1){
+                        !{__min(${b * h * w * inch}, ${inputpatternname}[(${ipidxname},)])}
+                    } else{
+                        !{${inputpatternname}[(${ipidxname},)]}
+                    }
+
+                let isubviewexpr = !{${inputname}[(${inputidxname}:${inputidxname} + ${outchend}:1,)]}
+                !{
+                    let ${inputidxname} = ${iidxexpr}
+                    // let ${isubviewname} = ${isubviewexpr}
+                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, 0, 0, 0, 0))}
+                }
+            }
+        }
+    
+    genExpr 0 unrollidxs
+
+fun vmlal(sum : tensor<i32, 1>, i : tensor<i16, 1>, w : tensor<i16, 1>) -> i32 {
+    sum <- sum + cast<i32>(i * w)
+    _end_
+}
+
+// unrolld load input, load weight, and fma
+// unrolled along outch, inch{    
+//   load weight
+//   unrolled along outrows, outcols{
+//     loadinput
+//     fma   
+//   }
+// }
+let unrolledLoadInputAndPoolExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let nameinput = params->nameinput
+    let nameinputpattern = params->nameinputpattern
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (unrollwrow, unrollwcol) = params->pool_size
+    let packinch = ll.item (idxs->outch) (params->packoutchs)
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+    let tileoutchslen = ll.len (params->tileoutchs)
+    let inch = params->input_shape[|3|]
+    let outch = params->output_shape[|3|]
+    let groupedinch, groupedoutch = inch, outch
+    let premicroopsimpls = params->premicroopsimpls
+
+    let loadInputExpr uidxs params idxs nextop = 
+        let packinch = ll.item (idxs->outch) (params->packoutchs)
+
+        let inchOffset uidxs =
+            let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+            !{${params->iternameoutch} + ${inchidx * packinch}}
+
+        let inchidx = uidxs->inch
+        let outchidx = uidxs->outch
+
+        let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+        let inputpattern = getVarName Inputpattern uidxs params idxs
+        let inputsubview = getVarName Inputsubview uidxs params idxs
+        let inputidxname = getVarName Inputidx uidxs params idxs
+        let input = getVarName Input uidxs params idxs
+        let inputzero = params->nameinputzeropoints
+
+        // let expr = !{${inputsubview}[(${inchOffset uidxs}:${inchOffset uidxs} + ${packinch}:1,)]}
+        // let expr = !{${params->nameinput}[(${inputidxname} + ${inchOffset uidxs}:${inputidxname} + ${inchOffset uidxs} + ${packinch}:1,)]}
+        let inputidxname2 = inputidxname + toStr(outchidx)
+        let expr = !{${params->nameinput}[(${inputidxname2}:${inputidxname2} + ${packinch}:1,)]}
+
+        let vectorsize = ll.item (idxs->outch) (params->packoutchs)
+        let fusedExpr = fsn.genMicroOpsExpr premicroopsimpls input input ([inputidxname2]) vectorsize (rtType(f32)) 
+        if(params->isQuant){
+            !{
+                let ${inputidxname2} = ${inputidxname} + ${inchOffset uidxs}
+                let ${input} = ${expr}
+                ${fusedExpr nextop}
+            }
+        } else{
+            !{
+                let ${inputidxname2} = ${inputidxname} + ${inchOffset uidxs}
+                let ${input} = ${expr}
+                ${fusedExpr nextop}
+            }
+        }
+
+    let executeAvgpoolExpr uidxs params idxs nextop =
+        let rec genExpr index uidxs params idxs nextop =
+            let input = getVarName Input uidxs params idxs
+            let sum = getVarName Sum uidxs params idxs
+
+            if(params->isQuant){
+                !{
+                    ${sum} <- ${sum} + ${input}
+                    ${nextop}
+                }
+            } else{
+                !{
+                    ${sum} <- ${sum} + ${input}
+                    ${nextop}
+                }
+            }
+
+        genExpr 0 uidxs params idxs nextop
+
+    let executeMaxpoolExpr uidxs params idxs nextop =
+        let rec genExpr index uidxs params idxs nextop =
+            let input = getVarName Input uidxs params idxs
+            let sum = getVarName Sum uidxs params idxs
+            let sum_flag = sum + "_flag"
+
+            if(params->isQuant){
+                !{
+                    let ${sum_flag} = cast<i8>(${sum} > ${input})
+                    ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1i8) - ${sum_flag}) * ${input}
+                    ${nextop}
+                }
+            } else{
+                match params->weight with
+                    | ut.TensorF16 t    ->
+                        !{
+                            let ${sum_flag} = cast<f16>(cast<i32>(${sum} > ${input}))
+                            ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1.f16) - ${sum_flag}) * ${input}
+                            ${nextop}
+                        }
+                    | ut.TensorF32 t    ->
+                        !{
+                            // let ${sum_flag} = cast<f32>(cast<i32>(${sum} > ${input}))
+                            // ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1.f32) - ${sum_flag}) * ${input}
+                            ${sum} <- __max(${sum}, ${input})
+                            ${nextop}
+                        }
+            }
+
+        genExpr 0 uidxs params idxs nextop
+
+
+    let rec genExpr index uidxs uidxs_old = 
+        let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+        let stopflag = unrollrow * unrollcol * unrolloutch
+        if(index == stopflag){
+            let (nextop, opsnew) = getop ops
+            let idxsnew = updateIndexes idxs Inch 0
+            nextop params idxsnew opsnew
+        } else{
+            let (rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew) =
+                if ((colidx + 1 == unrollcol) && (rowidx + 1 == unrollrow)) {
+                    (0, 0, outchidx + 1, outchidx + 1, 0, 0)
+                } else if (colidx + 1 == unrollcol){
+                    (rowidx + 1, 0, outchidx, outchidx, 0, 0)
+                } else {
+                    (rowidx, colidx + 1, outchidx, outchidx, 0, 0)
+                }
+            let loadInput = loadInputExpr uidxs params idxs 
+            let executePool = 
+                if(params->pooltype == "avgpool2d"){
+                    executeAvgpoolExpr uidxs params idxs
+                } else if(params->pooltype == "maxpool2d"){
+                    executeMaxpoolExpr uidxs params idxs
+                } else{
+                    except("pooltype is one of avgpool2d, maxpool2d")
+                }
+            
+            loadInput (executePool (genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew)) uidxs))
+        }
+
+    genExpr 0 unrollidxs unrollidxs
+
+let unrolledLoadInputAndPool2Expr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let nameinput = params->nameinput
+    let nameinputpattern = params->nameinputpattern
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (unrollwrow, unrollwcol) = params->pool_size
+    let packinch = ll.item (idxs->outch) (params->packoutchs)
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+    let tileoutchslen = ll.len (params->tileoutchs)
+    let inch = params->input_shape[|3|]
+    let outch = params->output_shape[|3|]
+    let groupedinch, groupedoutch = inch, outch
+    let premicroopsimpls = params->premicroopsimpls
+
+    let loadInputExpr uidxs params idxs nextop = 
+        let packinch = ll.item (idxs->outch) (params->packoutchs)
+
+        let inchOffset uidxs =
+            let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+            !{${params->iternameoutch} + ${outchidx * packoutch}}
+
+        let inchidx = uidxs->inch
+        let outchidx = uidxs->outch
+        let wrowidx = uidxs->weightrow
+        let wcolidx = uidxs->weightcol
+
+        let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+        let inputpattern = getVarName Inputpattern uidxs params idxs
+        let inputsubview = getVarName Inputsubview uidxs params idxs
+        let inputidxname = getVarName Inputidx2 uidxs params idxs
+        let input = getVarName Input uidxs params idxs
+        let inputzero = params->nameinputzeropoints
+        let outchoffsetname = params->iternameoutch + toStr(outchidx * packoutch)
+
+
+        // let expr = !{${inputsubview}[(${inchOffset uidxs}:${inchOffset uidxs} + ${packinch}:1,)]}
+        // let expr = !{${params->nameinput}[(${inputidxname} + ${inchOffset uidxs}:${inputidxname} + ${inchOffset uidxs} + ${packinch}:1,)]}
+        let inputidxname2 = inputidxname + toStr(outchidx)
+        let vectorsize = ll.item (idxs->outch) (params->packoutchs)
+        let vectordtype = params->input_dtype
+        let fusedExpr = fsn.genMicroOpsExpr premicroopsimpls input input ([inputidxname2]) vectorsize vectordtype
+        let expr = !{${params->nameinput}[(${inputidxname2}:${inputidxname2} + ${packinch}:1,)]}
+        if(params->isQuant){
+            !{
+                let ${inputidxname2} = ${inputidxname} + ${inchOffset uidxs}
+                let mut ${input} = ${expr}
+                ${fusedExpr nextop}
+            }
+        } else{
+            if(wrowidx == 0 && wcolidx == 0){
+                !{
+                    let ${outchoffsetname} = ${inchOffset uidxs}
+                    let ${inputidxname2} = ${inputidxname} + ${outchoffsetname}
+                    let mut ${input} = ${expr}
+                    ${fusedExpr nextop}
+                }
+            } else{
+                !{
+                    let ${inputidxname2} = ${inputidxname} + ${outchoffsetname}
+                    let mut ${input} = ${expr}
+                    ${fusedExpr nextop}
+                }
+            }
+        }
+
+    let executeAvgpoolExpr uidxs params idxs nextop =
+        let rec genExpr index uidxs params idxs nextop =
+            let input = getVarName Input uidxs params idxs
+            let sum = getVarName Sum uidxs params idxs
+
+            if(params->isQuant){
+                !{
+                    ${sum} <- ${sum} + ${input}
+                    ${nextop}
+                }
+            } else{
+                !{
+                    ${sum} <- ${sum} + ${input}
+                    ${nextop}
+                }
+            }
+
+        genExpr 0 uidxs params idxs nextop
+
+    let executeMaxpoolExpr uidxs params idxs nextop =
+        let rec genExpr index uidxs params idxs nextop =
+            let input = getVarName Input uidxs params idxs
+            let sum = getVarName Sum uidxs params idxs
+            let sum_flag = sum + "_flag"
+
+            if(params->isQuant){
+                !{
+                    // let ${sum_flag} = cast<i8>(${sum} > ${input})
+                    // ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1i8) - ${sum_flag}) * ${input}
+                    ${sum} <- __max(${sum}, ${input})
+                    ${nextop}
+                }
+            } else{
+                match params->weight with
+                    | ut.TensorF16 t    ->
+                        !{
+                            // let ${sum_flag} = cast<f16>(cast<i32>(${sum} > ${input}))
+                            // ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1.f16) - ${sum_flag}) * ${input}
+                            ${sum} <- __max(${sum}, ${input})
+                            ${nextop}
+                        }
+                    | ut.TensorF32 t    ->
+                        !{
+                            // let ${sum_flag} = cast<f32>(cast<i32>(${sum} > ${input}))
+                            // ${sum} <- ${sum_flag} * ${sum} + (tensor((${packoutch},), 1.f32) - ${sum_flag}) * ${input}
+                            ${sum} <- __max(${sum}, ${input})
+                            ${nextop}
+                        }
+            }
+
+        genExpr 0 uidxs params idxs nextop
+
+
+    let rec genExpr index uidxs uidxs_old = 
+        let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+        // let stopflag = unrollrow * unrollcol * unrolloutch
+        let stopflag = unrolloutch * unrollwrow * unrollwcol
+        if(index == stopflag){
+            let (nextop, opsnew) = getop ops
+            let idxsnew = updateIndexes idxs Inch 0
+            nextop params idxsnew opsnew
+        } else{
+            // let (rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew) =
+            //     if ((colidx + 1 == unrollcol) && (rowidx + 1 == unrollrow)) {
+            //         (0, 0, outchidx + 1, outchidx + 1, 0, 0)
+            //     } else if (colidx + 1 == unrollcol){
+            //         (rowidx + 1, 0, outchidx, outchidx, 0, 0)
+            //     } else {
+            //         (rowidx, colidx + 1, outchidx, outchidx, 0, 0)
+            //     }
+            let (rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew) =
+                if ((wrowidx + 1 == unrollwrow) && (wcolidx + 1 == unrollwcol)){
+                    (0, 0, 0, outchidx + 1, 0, 0)
+                }else if (wcolidx + 1 == unrollwcol){
+                    (0, 0, 0, outchidx, wrowidx + 1, 0)
+                } else {
+                    (0, 0, 0, outchidx, wrowidx, wcolidx + 1)
+                }
+            let loadInput = loadInputExpr uidxs params idxs 
+            let executePool = 
+                if(params->pooltype == "avgpool2d"){
+                    executeAvgpoolExpr uidxs params idxs
+                } else if(params->pooltype == "maxpool2d"){
+                    executeMaxpoolExpr uidxs params idxs
+                } else{
+                    except("pooltype is one of avgpool2d, maxpool2d")
+                }
+            
+            loadInput (executePool (genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew)) uidxs))
+        }
+
+    genExpr 0 unrollidxs unrollidxs
+// fun vqdmulhq(sum : tensor<i32, 1>, mult : tensor<i32, 1>) -> i32 {
+//     sum <- cast<i32>((cast<i64>(sum) * cast<i64>(mult)) >> 32)
+//     _end_
+// }
+
+let unrolledStoreExpr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let nameinput = params->nameinput
+    let nameinputpattern = params->nameinputpattern
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (unrollwrow, unrollwcol) = params->pool_size
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+    let tileoutchslen = ll.len (params->tileoutchs)
+    let (_, outh, outw, outch) = params->output_shape
+
+    let rec genExpr index uidxs = 
+        let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+        // if(index == unrollrow * unrollcol * unrollinch * unrolloutch){
+        if(index == unrollrow * unrollcol * unrolloutch){
+            let (nextop, opsnew) = getop ops
+            let idxsnew = updateIndexes idxs Inch 0
+            nextop params idxsnew opsnew
+        } else{
+            let (rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew) =
+                if ((colidx + 1 == unrollcol) && (rowidx + 1 == unrollrow)) {
+                    (0, 0, 0, outchidx + 1, 0, 0)
+                } else if (colidx + 1 == unrollcol){
+                    (rowidx + 1, 0, 0, outchidx, 0, 0)
+                } else {
+                    (rowidx, colidx + 1, 0, outchidx, 0, 0)
+                }
+            if(params->isQuant){
+                let mult = getVarName Mult uidxs params idxs
+                let shift = getVarName Shift uidxs params idxs
+                let sum = getVarName Sum uidxs params idxs
+                let input_zero = params->nameinputzeropoints
+                let output_zero = params->nameoutputzeropoints
+                let output = params->nameoutput
+                let inputpattern = params->nameinputpattern
+                let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+                let inputidx = getVarName Inputidx uidxs params idxs
+                let divpattern = params->namedivpattern
+                let divpatternidx = getVarName Divpatternidx uidxs params idxs
+                let div = getVarName Div uidxs params idxs
+                if(params->pooltype == "avgpool2d"){
+                    if(rowidx == 0 && colidx == 0){
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            let ${divpatternidx} = ${inputidx} / ${outch}
+                            let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            let ${mult} = ${params->namemult}[(${div}[(0,)]:${div}[(0,)] + 1:1,)]//[(${params->iternameoutch} + ${packoutch * outchidx}:${params->iternameoutch} + ${packoutch * (outchidx + 1)}:1,)]
+                            let ${shift} = ${params->nameshift}[(${div}[(0,)]:${div}[(0,)] + 1:1,)]//[(${params->iternameoutch} + ${packoutch * outchidx}:${params->iternameoutch} + ${packoutch * (outchidx + 1)}:1,)]
+                            ${sum} <- ${sum} * ${mult}
+                            ${sum} <- (${sum} + (tensor((1,), {1i32}) << (${shift} - tensor((1,), {1i32})))) >> (${shift})
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    } else{
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            let ${divpatternidx} = ${inputidx} / ${outch}
+                            let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            ${sum} <- cast<i32>((cast<i64>(${sum}) * cast<i64>(${mult})) >> tensor((1,), 31))
+                            ${sum} <- (${sum} + (tensor((1,), {1i32}) << (${shift} - tensor((1,), {1i32})))) >> (${shift})
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    }
+                } else if(params->pooltype == "maxpool2d"){
+                    !{
+                        let ${inputidx} = ${inputpattern}[(${inputpatternidx},)]
+                        ${output}[(${inputidx} + ${iternameoutch}:${inputidx} + ${iternameoutch} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                        ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                    }
+                }
+            } else{
+                let sum = getVarName Sum uidxs params idxs
+                let output = params->nameoutput
+                let inputpattern = params->nameinputpattern
+                let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+                let inputidx = getVarName Inputidx uidxs params idxs
+                let iternameoutch = params->iternameoutch
+                let divpattern = params->namedivpattern
+                let divpatternidx = getVarName Divpatternidx uidxs params idxs
+                let div = getVarName Div uidxs params idxs
+                if(params->pooltype == "avgpool2d"){
+                    if(outchidx == 0){
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            let ${divpatternidx} = ${inputidx} / ${outch}
+                            let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- ${sum} * ${div} // / ${div}
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    } else{
+                        !{
+                            // let ${inputidx} = ${inputpattern}[${(inputpatternidx,)}] + ${iternameoutch}
+                            // let ${divpatternidx} = ${inputidx} / ${outch}
+                            // let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            ${output}[(${inputidx} + ${outchidx * packoutch}:${inputidx} + ${(outchidx + 1) * packoutch}:1,)] <- ${sum} * ${div} // / ${div}
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    }
+                } else{
+                    if(outchidx == 0){
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- ${sum}
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    } else{
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            ${output}[(${inputidx} + ${outchidx * packoutch}:${inputidx} + ${(outchidx + 1) * packoutch}:1,)] <- ${sum}
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    }
+                }
+            }
+        }
+
+    genExpr 0 unrollidxs
+
+let unrolledStore2Expr params idxs ops = 
+    let unrollidxs = UnrollIndexes(0, 0, 0, 0, 0, 0)
+    let nameinput = params->nameinput
+    let nameinputpattern = params->nameinputpattern
+    let (unrollrow, unrollcol, unrollinch, unrolloutch) = getUnrolls params idxs
+    let (unrollwrow, unrollwcol) = params->pool_size
+    let packoutch = ll.item (idxs->outch) (params->packoutchs)
+    let tileoutchslen = ll.len (params->tileoutchs)
+    let (_, outh, outw, outch) = params->output_shape
+
+    let rec genExpr index uidxs = 
+        let (rowidx, colidx, inchidx, outchidx, wrowidx, wcolidx) = (uidxs->outrow, uidxs->outcol, uidxs->inch, uidxs->outch, uidxs->weightrow, uidxs->weightcol)
+        // if(index == unrollrow * unrollcol * unrollinch * unrolloutch){
+        if(index == unrollrow * unrollcol * unrolloutch){
+            let (nextop, opsnew) = getop ops
+            let idxsnew = updateIndexes idxs Inch 0
+            nextop params idxsnew opsnew
+        } else{
+            let (rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew) =
+                if ((colidx + 1 == unrollcol) && (rowidx + 1 == unrollrow)) {
+                    (0, 0, 0, outchidx + 1, 0, 0)
+                } else if (colidx + 1 == unrollcol){
+                    (rowidx + 1, 0, 0, outchidx, 0, 0)
+                } else {
+                    (rowidx, colidx + 1, 0, outchidx, 0, 0)
+                }
+            if(params->isQuant){
+                let mult = getVarName Mult uidxs params idxs
+                let shift = getVarName Shift uidxs params idxs
+                let sum = getVarName Sum uidxs params idxs
+                let input_zero = params->nameinputzeropoints
+                let output_zero = params->nameoutputzeropoints
+                let output = params->nameoutput
+                let inputpattern = params->nameinputpattern
+                let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+                let inputidx = getVarName Inputidx uidxs params idxs
+                let divpattern = params->namedivpattern
+                let divpatternidx = getVarName Divpatternidx uidxs params idxs
+                let div = getVarName Div uidxs params idxs
+                if(params->pooltype == "avgpool2d"){
+                    if(rowidx == 0 && colidx == 0){
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            let ${divpatternidx} = ${inputidx} / ${outch}
+                            let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            let ${mult} = ${params->namemult}[(${div}[(0,)]:${div}[(0,)] + 1:1,)]//[(${params->iternameoutch} + ${packoutch * outchidx}:${params->iternameoutch} + ${packoutch * (outchidx + 1)}:1,)]
+                            let ${shift} = ${params->nameshift}[(${div}[(0,)]:${div}[(0,)] + 1:1,)]//[(${params->iternameoutch} + ${packoutch * outchidx}:${params->iternameoutch} + ${packoutch * (outchidx + 1)}:1,)]
+                            ${sum} <- ${sum} * ${mult}
+                            ${sum} <- (${sum} + (tensor((1,), {1i32}) << (${shift} - tensor((1,), {1i32})))) >> (${shift})
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    } else{
+                        !{
+                            let ${inputidx} = ${inputpattern}[(${inputpatternidx},)] + ${iternameoutch}
+                            let ${divpatternidx} = ${inputidx} / ${outch}
+                            let ${div} = ${divpattern}[(${divpatternidx}:${divpatternidx} + 1:1,)]
+                            ${sum} <- cast<i32>((cast<i64>(${sum}) * cast<i64>(${mult})) >> tensor((1,), 31))
+                            ${sum} <- (${sum} + (tensor((1,), {1i32}) << (${shift} - tensor((1,), {1i32})))) >> (${shift})
+                            ${output}[(${inputidx}:${inputidx} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                            ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                        }
+                    }
+                } else if(params->pooltype == "maxpool2d"){
+                    !{
+                        let ${inputidx} = ${inputpattern}[(${inputpatternidx},)]
+                        ${output}[(${inputidx} + ${iternameoutch}:${inputidx} + ${iternameoutch} + ${packoutch}:1,)] <- cast<i8>(${sum})
+                        ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                    }
+                }
+            } else{
+                let sum = getVarName Sum uidxs params idxs
+                let output = params->nameoutput
+                let inputpattern = params->nameinputpattern
+                let inputpatternidx = getVarName Inputpatternidx uidxs params idxs
+                let inputidx = getVarName Inputidx2 (UnrollIndexes(rowidx, colidx, inchidx, outchidx, unrollwrow, 0)) params idxs
+                let inputidxq = inputidx + params->iternameoutch
+                let iternameoutch = params->iternameoutch
+                let divpattern = params->namedivpattern
+                let divpatternidx = getVarName Divpatternidx uidxs params idxs
+                let div = getVarName Div uidxs params idxs
+                let microopsimpls = params->postmicroopsimpls
+                let vectordtype = params->output_dtype
+                let fusionExpr = fsn.genMicroOpsExpr microopsimpls sum sum ([!{${inputidxq} + ${outchidx * packoutch}}]) packoutch vectordtype
+                let (prefusionExpr, postfusionExpr) = 
+                    if(params->pooltype == "avgpool2d"){
+                        if(outchidx == 0){
+                            let pre nextop =
+                                !{
+                                    let ${inputidxq} = ${inputidx} + ${iternameoutch}
+                                    ${sum} <- ${sum} * ${div}
+                                    ${nextop}
+                                }
+                            let post =
+                                !{
+                                    ${output}[(${inputidxq}:${inputidxq} + ${packoutch}:1,)] <- ${sum}
+                                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                                }
+                            (pre, post)
+                        } else{
+                            let pre nextop =
+                                !{
+                                    ${sum} <- ${sum} * ${div}
+                                    ${nextop}
+                                }
+                            let post =
+                                !{
+                                    ${output}[(${inputidxq} + ${outchidx * packoutch}:${inputidxq} + ${(outchidx + 1) * packoutch}:1,)] <- ${sum}
+                                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                                }
+                            (pre, post)
+                        }
+                    } else{
+                        if(outchidx == 0){
+                            let pre nextop =
+                                !{
+                                    let ${inputidxq} = ${inputidx} + ${iternameoutch}
+                                    ${nextop}
+                                }
+                            let post =
+                                !{
+                                    ${output}[(${inputidxq}:${inputidxq} + ${packoutch}:1,)] <- ${sum}
+                                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                                }
+                            (pre, post)
+                        } else{
+                            let pre nextop =
+                                !{
+                                    ${nextop}
+                                }
+                            let post =
+                                !{
+                                    ${output}[(${inputidxq} + ${outchidx * packoutch}:${inputidxq} + ${(outchidx + 1) * packoutch}:1,)] <- ${sum}
+                                    ${genExpr (index + 1) (UnrollIndexes(rowidxnew, colidxnew, inchidxnew, outchidxnew, wrowidxnew, wcolidxnew))}
+                                }
+                            (pre, post)
+                        }
+                    }
+                prefusionExpr (fusionExpr postfusionExpr)
+            }
+        }
+
+    genExpr 0 unrollidxs
+
+
+_end_

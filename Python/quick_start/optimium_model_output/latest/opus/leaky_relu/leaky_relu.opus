@@ -1,0 +1,230 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module common.utils as u
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun leaky_relu(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${  
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Leaky_relu x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex layer_params) with 
+                | params.Leaky_relu x -> x
+
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input1_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)   
+        
+        
+        let alpha = layerparams->alpha
+        
+        for (i from 0 to (ll.len output_shape)){
+            if(ll.item i output_shape == ll.item i input1_shape){
+                _end_
+            } else{
+                except("output shape(" + toStr(output_shape) + ") is not compatible with expected shape(" + toStr(input1_shape) + "}")
+            }
+        }
+
+        let rec shape_size index shape data =
+            if(index == (ll.len shape)){
+                data
+            }
+            else{
+                shape_size (index+1) shape (data*(ll.item index shape))
+            }
+        let input1_size = shape_size 0 input1_shape 1
+        let output_size = shape_size 0 output_shape 1
+
+        let _ = if((pack * unroll > input1_size)){
+            except("pack * unroll(" + toStr(pack * unroll) + ") should be larger than size of input1(" + toStr(input1_size) + ")")
+        } else{
+            _end_
+        }
+        
+        let tiles =
+            if(input1_size % (pack*unroll) == 0){
+                [(0, input1_size); (input1_size, input1_size)]
+            } else{
+                let end1 = input1_size - (input1_size % (pack*unroll))
+                [(0, end1); (end1, input1_size)]
+            }
+
+        let zero_tensor = 
+        if (input1_dtype== rtType(f32)){
+                ut.TensorF32(tensor((1,), 0.f))
+            }else if(input1_dtype == rtType(f16)){
+                ut.TensorF16(tensor((1,), 0.f16))
+            }else if(input1_dtype == rtType(i8)){
+                input1_zero_points
+            } else{
+                except("ff")
+            }
+        
+        let isQuant = if(input1_dtype == rtType(i8)){true} else{false}
+        let leaky = cast<f32>(tensor((1,),alpha))
+        let leaky16 = cast<f16>(leaky)
+        
+        let (start, end) = ll.item 0 tiles
+        let (start2, end2) = ll.item 1 tiles
+        
+        if(isQuant){
+            let mul = cast<i16>((ut.toCtTensorF32 input1_scales/ut.toCtTensorF32 output_scales) * tensor((1,),256.f) + tensor((1,),0.5f))
+            let negmul = cast<i16>((ut.toCtTensorF32 input1_scales/ut.toCtTensorF32 output_scales*leaky) * tensor((1,),256.f) + tensor((1,),0.5f))
+            let rec tem num = 
+                if (num == unroll + 1){
+                    !{
+                        _end_
+                    }
+                } else{
+                    !{
+                        data_i16 <- __max(batchin[(idx0+${(num-1)*pack}:idx0+${num*pack}:1i,)],${ut.toRtTensor zero_tensor})
+                        data_i16 <- ((cast<i16>(data_i16)-cast<i16>(${ut.toRtTensor zero_tensor})) << (tensor((1,),7i)))
+                        data_i16 <- cast<i16>((((mul)*cast<i32>(data_i16)) + tensor((1,),16384i32)) >> (tensor((1,), 15i))) + ${ut.toRtTensor output_zero_points}
+                        outp[(idx0+${(num-1)*pack}:idx0+${num*pack}:1i,)] <- cast<i8>(__max(__min(data_i16,tensor((${pack},),127i16)),tensor((${pack},),-128i16)))
+                        ${tem (num+1)}
+                    }
+                }
+            let rec tem2 num last = 
+                if(last - num == 0){
+                    !{
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else if (last - num < pack){
+                    !{
+                        let mut data_i16_2 = __max(batchin[(${num}:${last}:1i,)],${ut.toRtTensor zero_tensor})
+                        data_i16_2 <- ((cast<i16>(data_i16_2)-cast<i16>(${ut.toRtTensor zero_tensor})) << (tensor((1,),7i)))
+                        data_i16_2 <- cast<i16>((((mul)*cast<i32>(data_i16_2)) + tensor((1,),16384i32)) >> (tensor((1,), 15i))) + ${ut.toRtTensor output_zero_points}
+                        outp[(${num}:${last}:1i,)] <- cast<i8>(__max(__min(data_i16_2,tensor((${last-num},),127i16)),tensor((${last-num},),-128i16)))
+                        
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else{
+                    !{
+                        data_i16 <- __max(batchin[(${num}:${num + pack}:1i,)],${ut.toRtTensor zero_tensor})
+                        data_i16 <- ((cast<i16>(data_i16)-cast<i16>(${ut.toRtTensor zero_tensor})) << (tensor((1,),7i)))
+                        data_i16 <- cast<i16>((((mul)*cast<i32>(data_i16)) + tensor((1,),16384i32)) >> (tensor((1,), 15i))) + ${ut.toRtTensor output_zero_points}
+                        outp[(${num}:${num + pack}:1i,)] <- cast<i8>(__max(__min(data_i16,tensor((${pack},),127i16)),tensor((${pack},),-128i16)))
+                        
+                        ${tem2 (num+pack) last}
+                    }
+                }
+            
+            !{
+                let mut batchoutput = &outputs[|0|]
+                let batchinput1 = inputs[|0|]
+                let batchin = reshapeTo((${input1_size},),&batchinput1)
+                let mul = ${mul}
+                let negmul = ${negmul}
+                let mut outp = reshapeTo((${output_size},),&batchoutput)
+                let mut data_i16 = tensor((${pack},),0i16)
+                for(idx0 from 0 to ${start2} step ${pack*unroll}){
+                    ${tem 1}
+                }
+                ${tem2 start2 end2}
+            }
+        } else if(input1_dtype == rtType(f32)){
+            let rec tem num = 
+                if (num == unroll + 1){
+                    !{
+                        _end_
+                    }
+                } else{
+                    !{
+                        outp[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)] <- __max(batchin[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)],tensor((${pack},),0.f32)) + __min(batchin[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)],tensor((${pack},),0.f32))*${leaky}
+                        ${tem (num+1)}
+                    }
+                }
+            let rec tem2 num last = 
+                if(last - num == 0){
+                    !{
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else if (last - num < pack){
+                    !{
+                        outp[(${num}:${last}:1i,)] <- __max(batchin[(${num}:${last}:1i,)],tensor((${last-num},),0.f32)) + __min(batchin[(${num}:${last}:1i,)],tensor((${last-num},),0.f32))*${leaky}
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else{
+                    !{
+                        outp[(${num}:${num + pack}:1i,)] <- __max(batchin[(${num}:${num + pack}:1i,)],tensor((${pack},),0.f32)) + __min(batchin[(${num}:${num + pack}:1i,)],tensor((${pack},),0.f32))*${leaky}
+                        ${tem2 (num+pack) last}
+                    }
+                }
+            !{
+                let mut batchoutput = &outputs[|0|]
+                let batchinput1 = inputs[|0|]
+                let batchin = reshapeTo((${input1_size},),&batchinput1)
+                let mut outp = reshapeTo((${output_size},),&batchoutput)
+                for(idx0 from 0 to ${start2} step ${pack*unroll}){
+                    ${tem 1}
+                }
+                ${tem2 start2 end2}
+            }
+        } else{
+            let rec tem num = 
+                if (num == unroll + 1){
+                    !{
+                        _end_
+                    }
+                } else{
+                    !{
+                        outp[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)] <- __max(batchin[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)],tensor((${pack},),0.f16)) + __min(batchin[(idx0+${(num-1)*pack}:idx0+${num*(pack)}:1i,)],tensor((${pack},),0.f16))*${leaky16}
+                        ${tem (num+1)}
+                    }
+                }
+            let rec tem2 num last = 
+                if(last - num == 0){
+                    !{
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else if (last - num < pack){
+                    !{
+                        outp[(${num}:${last}:1i,)] <- __max(batchin[(${num}:${last}:1i,)],tensor((${last-num},),0.f16)) + __min(batchin[(${num}:${last}:1i,)],tensor((${last-num},),0.f16))*${leaky16}
+                        //batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                        0
+                    }
+                } else{
+                    !{
+                        outp[(${num}:${num + pack}:1i,)] <- __max(batchin[(${num}:${num + pack}:1i,)],tensor((${pack},),0.f16)) + __min(batchin[(${num}:${num + pack}:1i,)],tensor((${pack},),0.f16))*${leaky16}
+                        ${tem2 (num+pack) last}
+                    }
+                }
+            !{
+                let mut batchoutput = &outputs[|0|]
+                let batchinput1 = inputs[|0|]
+                let batchin = reshapeTo((${input1_size},),&batchinput1)
+                let mut outp = reshapeTo((${output_size},),&batchoutput)
+                for(idx0 from 0 to ${start2} step ${pack*unroll}){
+                    ${tem 1}
+                }
+                ${tem2 start2 end2}
+            }
+        }
+    }
+}

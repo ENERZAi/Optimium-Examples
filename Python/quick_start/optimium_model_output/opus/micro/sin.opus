@@ -1,0 +1,135 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module micro.utils as mu
+// let (isMain, passScale, setVars, loopOps, microOps, storeOps) = getMicroLayerImpl
+
+let isMain = false
+
+let passScale input_scales output_scales =
+    let input_scale = ll.item 0 input_scales
+    let output_scale = ll.item 0 output_scales
+
+    if(ut.isEmpty input_scale){
+        ([1.f], 32, true)
+    } else{
+        let si = ut.toCtTensorF32 input_scale
+        let so = ut.toCtTensorF32 output_scale
+
+        ([si / so], 16, true)
+    }
+
+let setVars layer_param input_data input_shapes input_zero_points output_shapes output_zero_points input_edges output_edges input_tomains output_tomains input_towhichedges output_towhichedges ismain prefix accumscale = 
+    mu.baseNotMainSetVars layer_param input_data input_shapes input_zero_points output_shapes output_zero_points input_edges output_edges input_tomains output_tomains input_towhichedges output_towhichedges ismain prefix accumscale
+
+let loopOps layer_param input_shapes input_dtypes input_zero_points output_shapes output_dtypes output_zero_points output_towhichedges prefix =
+    // not implemented
+    let impl outputnames nextop =
+        nextop
+    impl
+
+let microOps layer_param input_data input_shapes input_edges output_edges input_tomains output_tomains ismain prefix = 
+    // quantization will be supported
+    let impl inputvectorname outputvectorname vectorstartidxlist vectorsize vectordtype nextop =
+        let inputvector = inputvectorname
+        let outputvector = outputvectorname
+
+        let get_constants size =
+            if (vectordtype == rtType(f32)) {
+                !{
+                    let c3 = tensor((${size},), -0.16666667163372039794921875f)
+                    let c5 = tensor((${size},), 0.008333544246852397918701171875f)
+                    let c7 = tensor((${size},), -0.00020112903439439833164215087890625f)
+                    let c9 = tensor((${size},), 0.0000136739354275050573050975799560546875f)
+                    let one = tensor((${size},), 1.0f)
+                    (&c3, &c5, &c7, &c9, &one)
+                }
+            } else if (vectordtype == rtType(f16)) {
+                !{
+                    let c3 = tensor((${size},), -0.16666667f16)
+                    let c5 = tensor((${size},), 0.008331f16)
+                    let c7 = tensor((${size},), -0.00017965f16)
+                    let one = tensor((${size},), 1.0f16)
+                    (&c3, &c5, &c7, &one)
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+
+        let calculate_sin =
+            if (vectordtype == rtType(f32)) {
+                !{
+                    let x = ${inputvector}
+                    let x_square = x * x
+
+                    let mut p = c9 * x_square + c7
+                    p <- p * x_square + c5
+                    p <- p * x_square + c3
+                    p <- p * x_square + one
+
+                    let xp = x * p
+                    &xp
+                }
+            } else if (vectordtype == rtType(f16)) {
+                !{
+                    let x = ${inputvector}
+                    let x_square = x * x
+
+                    let mut p = c7 * x_square + c5
+                    p <- p * x_square + c3
+                    p <- p * x_square + one
+
+                    let xp = x * p
+                    &xp
+                }
+            } else {
+                except("unsupported type: only f32, f16 supported")
+            }
+
+        let last_expr =
+            if (inputvectorname == outputvectorname) {
+                !{
+                    ${outputvector} <- result
+                    ${nextop}
+                }
+            } else {
+                !{
+                    let ${outputvector} = result
+                    ${nextop}
+                }
+            }
+
+        if (vectordtype == rtType(f32)) {
+            !{
+                let (c3, c5, c7, c9, one) = ${get_constants vectorsize}
+                let result = ${calculate_sin}
+
+                ${last_expr}
+            }
+        } else {
+            !{
+                let (c3, c5, c7, one) = ${get_constants vectorsize}
+                let result = ${calculate_sin}
+
+                ${last_expr}
+            }
+        }
+
+    impl
+
+let storeOps =
+    // not implemented
+    let impl nextop =
+        nextop
+    impl
+
+let mapIdxCtOps layer_param input_shapes output_shapes =
+    let impl idxlist isflatten =
+        idxlist
+    impl
+
+let padOps layer_param input_shapes output_shapes =
+    mu.basePadOps layer_param input_shapes output_shapes
+
+let microImpl = (isMain, passScale, setVars, loopOps, microOps, storeOps, padOps)
+
+_end_

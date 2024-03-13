@@ -1,0 +1,80 @@
+module core
+module core.List.List as ll
+module common.utils as commonutils
+
+type TemplateParameters = {input_type : rtType, input_dtype : rtType, input_shape : List<i32>,
+                           output_type : rtType, output_dtype : rtType, output_shape : List<i32>,
+                           framework : string,
+                           slice_dim: List<i32>, slice_start: List<i32>, slice_end : List<i32>,
+                           slice_step: List<i32>, squeeze_indices: List<i32>}
+
+type CodeGenParameters = {
+    input_type : rtType,
+    input_dtype : rtType,
+    input_shape : List<i32>,
+    output_type : rtType,
+    output_dtype : rtType,
+    output_shape : List<i32>,
+    slice_dim : List<i32>,
+    slice_start : List<i32>,
+    slice_end : List<i32>,
+    slice_step : List<i32>,
+    squeeze_indices : List<i32>,
+    input_index : List<rtexpr>
+}
+
+let get_input_index params =
+    let get_item_over_len index lst num =
+        // 인덱스가 리스트 범위 밖이면 -1-num이 나오도록 하는 함수
+        // 이 리스트가 다른 리스트의 인덱스를 다루는 것이라는 것을 알기 때문
+        if(index >= (ll.len <| lst)){
+            -1i - num
+        } else{
+            ll.item <| index <| lst
+        }
+    let max_index index val =
+        if(val > (ll.item <| index <| params->input_shape)){
+            ll.item <| index <| params->input_shape
+        } else{
+            val
+        }
+
+    let ndim = (ll.len <| params->input_shape)
+    let rec impl index cur_slice_index cur_squeeze_index =
+        if(index == ndim){
+            []
+        } else{
+            if(index == (get_item_over_len <| cur_slice_index <| params->slice_dim <| ndim)){
+                // slicing
+                let start = max_index <| index <| (ll.item <| cur_slice_index <| params->slice_start)
+                let end = max_index <| index <| (ll.item <| cur_slice_index <| params->slice_end)
+                let stride = max_index <| index <| (ll.item <| cur_slice_index <| params->slice_step)
+                if(cur_squeeze_index == (get_item_over_len <| cur_squeeze_index <| params->squeeze_indices <| ndim)){
+                    ll.concat <| [!{start}] <| (impl <| (index+1i) <| (cur_slice_index+1i) <| (cur_squeeze_index+1i))
+                } else{
+                    ll.concat <| [!{${start}:${end}:${stride}}] <| (impl <| (index+1i) <| (cur_slice_index+1i) <| cur_squeeze_index)
+                }
+            } else{
+                let start = 0i
+                let end = ll.item <| index <| params->input_shape
+                let stride = 1i
+
+                if(cur_squeeze_index == (get_item_over_len <| cur_squeeze_index <| params->squeeze_indices <| ndim)){
+                    ll.concat <| [!{${start}}] <| (impl <| (index+1i) <| cur_slice_index <| (cur_squeeze_index + 1i))
+                } else{
+                    ll.concat <| [!{${start}:${end}:${stride}}] <| (impl <| (index+1i) <| cur_slice_index <| cur_squeeze_index)
+                }
+            }
+        }
+    impl <| 0i <| 0i <| 0i
+
+let initCodeGen params =
+    let input_index = get_input_index <| params
+    let codeGenParameters = CodeGenParameters(params->input_type, params->input_dtype, params->input_shape,
+                                params->output_type, params->output_dtype, params->output_shape,
+                                params->slice_dim, params->slice_start, params->slice_end,
+                                params->slice_step, params->squeeze_indices, input_index)
+    
+    codeGenParameters
+
+_end_

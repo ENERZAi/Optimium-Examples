@@ -18,12 +18,12 @@ This example describes how to run face detection model on Linux with Optimium.
 1. Optimize the model using Optimium.
     ``` bash
     # Create a template
-    $OPTIMIUM_SDK_ROOT/run_optimium.sh --working_dir workdir --create_template
+    $OPTIMIUM_SDK_ROOT/run_optimium.sh --working_dir $YOUR_WORKING_DIR --create_template
 
-    # edit your user_arguments.json: "YOUR_MODEL.tflite" to "pose_landmark_lite.tflite"
+    # edit your user_arguments.json: "YOUR_MODEL.tflite" to "face_detection_short_range.tflite"
 
     # Optimize the model
-    $OPTIMIUM_SDK_ROOT/run_optimium.sh --working_dir workdir
+    $OPTIMIUM_SDK_ROOT/run_optimium.sh --working_dir $YOUR_WORKING_DIR
     ```
 
 1. Open `Cpp` folder on the terminal and type commands below to build.

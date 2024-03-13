@@ -1,0 +1,55 @@
+module core.List.List as ll
+module interpolate.utils as u
+module interpolate.nearest_utils as nu
+module common.utils as commonutils
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun nearest_interpolate(batchinput : input_t, mut &batchoutput : output_t) -> f32{
+    ${
+        let (pack,) = ll.item <| 0 <| (optim_param->pack)
+        let nchw = optim_params->nchw
+        let input_dtype = ll.item 0 (ll.item 0 input_dtypes)
+        let input_shape = ll.item 0 (ll.item 0 input_shapes)
+        let input_scale = ll.item 0 (ll.item 0 input_scales)
+        let input_zero_point = ll.item 0 (ll.item 0 input_zero_points)
+        let output_dtype = ll.item 0 (ll.item 0 output_dtypes)
+        let output_shape = ll.item 0 (ll.item 0 output_shapes)
+        let output_scale = ll.item 0 (ll.item 0 output_scales)
+        let output_zero_point = ll.item 0 (ll.item 0 output_zero_points)
+
+        let thislayer_params = 
+            match (ll.item 0 layer_params) with
+                | params.Interpolate x -> x
+                | _ -> except("not Linear")
+
+        let recompute_scale_factor = 0
+        let templateparams = u.TemplateParameters(input_shape, input_t, input_dtype, 
+                                                    output_shape, output_t, output_dtype,
+                                                    thislayer_params->scale_factor, thislayer_params->align_corners, thislayer_params->half_pixel_centers,
+                                                    framework, nchw, pack, thislayer_params->antialias, recompute_scale_factor,
+                                                    thislayer_params->size, "coord", "accessed_input", input_scales, input_zero_points)
+        let params = u.initCodeGen templateparams
+
+        let spatial_dims = ((ll.len <| input_shape) - 2i)
+        let spatial_nums = (1i << spatial_dims)
+        let hw_nums = commonutils.factorial <| params->output_spatial_shape
+
+        let expr1 = nu.setCoordExpr <| params <| spatial_dims
+        let expr2 = !{
+            for(${params->spatial_iter} from 0i to ${hw_nums}){
+                ${
+                    let expr2_1 = nu.genNearestPointAccess <| spatial_dims <| spatial_nums <| params
+                    let expr2_2 = nu.genStore <| spatial_dims <| spatial_nums <| params
+                    expr2_1 <| expr2_2
+                }
+                
+            }
+        }
+        expr1 <| expr2
+    }
+}

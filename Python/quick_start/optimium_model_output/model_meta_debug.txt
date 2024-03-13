@@ -1,0 +1,1145 @@
+metadata_version: 5
+runtime_version: 768
+model_name: "face_detection_short-x64_native"
+default_layout: "NHWC"
+devices {
+  platform: PLATFORM_KIND_NATIVE
+  device_kind: DEVICE_KIND_X64
+}
+operations {
+  op_name: "CONV_2D_op2"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled"
+  input_tensors: "input"
+  output_tensors: "conv2d"
+  arguments: "input"
+  arguments: "conv2d"
+  devices: 0
+}
+operations {
+  op_name: "RELU_op3"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_relu_mangled"
+  input_tensors: "conv2d"
+  output_tensors: "activation"
+  arguments: "conv2d"
+  arguments: "activation"
+  devices: 0
+  inplace: true
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op6"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_MWGZLXEAQQ"
+  input_tensors: "activation"
+  output_tensors: "depthwise_conv2d"
+  arguments: "activation"
+  arguments: "depthwise_conv2d"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op9"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_WUXAVBBFGO"
+  input_tensors: "depthwise_conv2d"
+  input_tensors: "activation"
+  output_tensors: "activation_1"
+  arguments: "depthwise_conv2d"
+  arguments: "activation"
+  arguments: "activation_1"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op14"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_PLAZVYXUPN"
+  input_tensors: "activation_1"
+  output_tensors: "depthwise_conv2d_1"
+  arguments: "activation_1"
+  arguments: "depthwise_conv2d_1"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op18"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled"
+  input_tensors: "activation_1"
+  output_tensors: "channel_padding"
+  arguments: "activation_1"
+  arguments: "channel_padding"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op17"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_RUKWFMQPUN"
+  input_tensors: "depthwise_conv2d_1"
+  input_tensors: "channel_padding"
+  output_tensors: "activation_2"
+  arguments: "depthwise_conv2d_1"
+  arguments: "channel_padding"
+  arguments: "activation_2"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op23"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_HYWCIRLYGJ"
+  input_tensors: "activation_2"
+  output_tensors: "depthwise_conv2d_2"
+  arguments: "activation_2"
+  arguments: "depthwise_conv2d_2"
+  devices: 0
+}
+operations {
+  op_name: "fused_MAXPOOL2D_PAD_op24"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pool2d_mangled"
+  input_tensors: "activation_2"
+  output_tensors: "channel_padding_1"
+  arguments: "activation_2"
+  arguments: "channel_padding_1"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op27"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_FTPQBHEQCP"
+  input_tensors: "depthwise_conv2d_2"
+  input_tensors: "channel_padding_1"
+  output_tensors: "activation_3"
+  arguments: "depthwise_conv2d_2"
+  arguments: "channel_padding_1"
+  arguments: "activation_3"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op33"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_ZROLFYWXKN"
+  input_tensors: "activation_3"
+  output_tensors: "depthwise_conv2d_3"
+  arguments: "activation_3"
+  arguments: "depthwise_conv2d_3"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op37"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_ZFKWHCUACJ"
+  input_tensors: "activation_3"
+  output_tensors: "channel_padding_2"
+  arguments: "activation_3"
+  arguments: "channel_padding_2"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op36"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_ZRJASAMFCD"
+  input_tensors: "depthwise_conv2d_3"
+  input_tensors: "channel_padding_2"
+  output_tensors: "activation_4"
+  arguments: "depthwise_conv2d_3"
+  arguments: "channel_padding_2"
+  arguments: "activation_4"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op42"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_ZLWAUELLKS"
+  input_tensors: "activation_4"
+  output_tensors: "depthwise_conv2d_4"
+  arguments: "activation_4"
+  arguments: "depthwise_conv2d_4"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op46"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_SLELCNHPZO"
+  input_tensors: "activation_4"
+  output_tensors: "channel_padding_3"
+  arguments: "activation_4"
+  arguments: "channel_padding_3"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op45"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_KNMQXVHNPX"
+  input_tensors: "depthwise_conv2d_4"
+  input_tensors: "channel_padding_3"
+  output_tensors: "activation_5"
+  arguments: "depthwise_conv2d_4"
+  arguments: "channel_padding_3"
+  arguments: "activation_5"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op51"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_MYPZRYPKZT"
+  input_tensors: "activation_5"
+  output_tensors: "depthwise_conv2d_5"
+  arguments: "activation_5"
+  arguments: "depthwise_conv2d_5"
+  devices: 0
+}
+operations {
+  op_name: "fused_MAXPOOL2D_PAD_op52"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pool2d_mangled_LLYWPZSFWX"
+  input_tensors: "activation_5"
+  output_tensors: "channel_padding_4"
+  arguments: "activation_5"
+  arguments: "channel_padding_4"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op55"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_NKDNSQVYHR"
+  input_tensors: "depthwise_conv2d_5"
+  input_tensors: "channel_padding_4"
+  output_tensors: "activation_6"
+  arguments: "depthwise_conv2d_5"
+  arguments: "channel_padding_4"
+  arguments: "activation_6"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op61"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_QVAJQRXTLO"
+  input_tensors: "activation_6"
+  output_tensors: "depthwise_conv2d_6"
+  arguments: "activation_6"
+  arguments: "depthwise_conv2d_6"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op65"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_NJJQLGNLRB"
+  input_tensors: "activation_6"
+  output_tensors: "channel_padding_5"
+  arguments: "activation_6"
+  arguments: "channel_padding_5"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op64"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_OOWBSICIOF"
+  input_tensors: "depthwise_conv2d_6"
+  input_tensors: "channel_padding_5"
+  output_tensors: "activation_7"
+  arguments: "depthwise_conv2d_6"
+  arguments: "channel_padding_5"
+  arguments: "activation_7"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op70"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_DGERDBOVLE"
+  input_tensors: "activation_7"
+  output_tensors: "depthwise_conv2d_7"
+  arguments: "activation_7"
+  arguments: "depthwise_conv2d_7"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op74"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_GQWCRJYNMR"
+  input_tensors: "activation_7"
+  output_tensors: "channel_padding_6"
+  arguments: "activation_7"
+  arguments: "channel_padding_6"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op73"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_KYPIQFEQHA"
+  input_tensors: "depthwise_conv2d_7"
+  input_tensors: "channel_padding_6"
+  output_tensors: "activation_8"
+  arguments: "depthwise_conv2d_7"
+  arguments: "channel_padding_6"
+  arguments: "activation_8"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op79"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_KSAYQOGHIL"
+  input_tensors: "activation_8"
+  output_tensors: "depthwise_conv2d_8"
+  arguments: "activation_8"
+  arguments: "depthwise_conv2d_8"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op83"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_UOYFOLPJCR"
+  input_tensors: "activation_8"
+  output_tensors: "channel_padding_7"
+  arguments: "activation_8"
+  arguments: "channel_padding_7"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op82"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_OTJMPRJWGJ"
+  input_tensors: "depthwise_conv2d_8"
+  input_tensors: "channel_padding_7"
+  output_tensors: "activation_9"
+  arguments: "depthwise_conv2d_8"
+  arguments: "channel_padding_7"
+  arguments: "activation_9"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op88"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_LUYLTHZCBI"
+  input_tensors: "activation_9"
+  output_tensors: "depthwise_conv2d_9"
+  arguments: "activation_9"
+  arguments: "depthwise_conv2d_9"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op92"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_TROKVMLVLD"
+  input_tensors: "activation_9"
+  output_tensors: "channel_padding_8"
+  arguments: "activation_9"
+  arguments: "channel_padding_8"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op91"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_JIGPMEGDOV"
+  input_tensors: "depthwise_conv2d_9"
+  input_tensors: "channel_padding_8"
+  output_tensors: "activation_10"
+  arguments: "depthwise_conv2d_9"
+  arguments: "channel_padding_8"
+  arguments: "activation_10"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op97"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_PIEWVTOTBJ"
+  input_tensors: "activation_10"
+  output_tensors: "depthwise_conv2d_10"
+  arguments: "activation_10"
+  arguments: "depthwise_conv2d_10"
+  devices: 0
+}
+operations {
+  op_name: "PAD_op101"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pad_mangled_RAZPZRMHPD"
+  input_tensors: "activation_10"
+  output_tensors: "channel_padding_9"
+  arguments: "activation_10"
+  arguments: "channel_padding_9"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op100"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_MCTDETGMRZ"
+  input_tensors: "depthwise_conv2d_10"
+  input_tensors: "channel_padding_9"
+  output_tensors: "activation_11"
+  arguments: "depthwise_conv2d_10"
+  arguments: "channel_padding_9"
+  arguments: "activation_11"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op106"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_EJFVROMGWR"
+  input_tensors: "activation_11"
+  output_tensors: "depthwise_conv2d_11"
+  arguments: "activation_11"
+  arguments: "depthwise_conv2d_11"
+  devices: 0
+}
+operations {
+  op_name: "CONV_2D_op148"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_WUDNSTXMUD"
+  input_tensors: "activation_11"
+  output_tensors: "classificator_8"
+  arguments: "activation_11"
+  arguments: "classificator_8"
+  devices: 0
+}
+operations {
+  op_name: "CONV_2D_op154"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_QLHCNWBJXG"
+  input_tensors: "activation_11"
+  output_tensors: "regressor_8"
+  arguments: "activation_11"
+  arguments: "regressor_8"
+  devices: 0
+}
+operations {
+  op_name: "fused_MAXPOOL2D_PAD_op107"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_pool2d_mangled_QWICILLFXI"
+  input_tensors: "activation_11"
+  output_tensors: "channel_padding_10"
+  arguments: "activation_11"
+  arguments: "channel_padding_10"
+  devices: 0
+}
+operations {
+  op_name: "RESHAPE_op158"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_reshape_mangled"
+  input_tensors: "classificator_8"
+  output_tensors: "reshape"
+  arguments: "classificator_8"
+  arguments: "reshape"
+  devices: 0
+  inplace: true
+}
+operations {
+  op_name: "RESHAPE_op160"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_reshape_mangled_MWNVEBMAWY"
+  input_tensors: "regressor_8"
+  output_tensors: "reshape_1"
+  arguments: "regressor_8"
+  arguments: "reshape_1"
+  devices: 0
+  inplace: true
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op110"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_AVCAZOYJPR"
+  input_tensors: "depthwise_conv2d_11"
+  input_tensors: "channel_padding_10"
+  output_tensors: "activation_12"
+  arguments: "depthwise_conv2d_11"
+  arguments: "channel_padding_10"
+  arguments: "activation_12"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op116"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_KIYTBNDMWE"
+  input_tensors: "activation_12"
+  output_tensors: "depthwise_conv2d_12"
+  arguments: "activation_12"
+  arguments: "depthwise_conv2d_12"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op119"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_ATTSJZHOVZ"
+  input_tensors: "depthwise_conv2d_12"
+  input_tensors: "activation_12"
+  output_tensors: "activation_13"
+  arguments: "depthwise_conv2d_12"
+  arguments: "activation_12"
+  arguments: "activation_13"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op124"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_ZJOAREYKHE"
+  input_tensors: "activation_13"
+  output_tensors: "depthwise_conv2d_13"
+  arguments: "activation_13"
+  arguments: "depthwise_conv2d_13"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op127"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_FSXZNABVZB"
+  input_tensors: "depthwise_conv2d_13"
+  input_tensors: "activation_13"
+  output_tensors: "activation_14"
+  arguments: "depthwise_conv2d_13"
+  arguments: "activation_13"
+  arguments: "activation_14"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op132"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_AQXLNSLVAS"
+  input_tensors: "activation_14"
+  output_tensors: "depthwise_conv2d_14"
+  arguments: "activation_14"
+  arguments: "depthwise_conv2d_14"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op135"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_VMOOCWFDKF"
+  input_tensors: "depthwise_conv2d_14"
+  input_tensors: "activation_14"
+  output_tensors: "activation_15"
+  arguments: "depthwise_conv2d_14"
+  arguments: "activation_14"
+  arguments: "activation_15"
+  devices: 0
+}
+operations {
+  op_name: "DEPTHWISE_CONV_2D_op140"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_NGFQJQAACU"
+  input_tensors: "activation_15"
+  output_tensors: "depthwise_conv2d_15"
+  arguments: "activation_15"
+  arguments: "depthwise_conv2d_15"
+  devices: 0
+}
+operations {
+  op_name: "fused_CONV2D_ADD_RELU_op143"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_MELHKIDAIA"
+  input_tensors: "depthwise_conv2d_15"
+  input_tensors: "activation_15"
+  output_tensors: "activation_16"
+  arguments: "depthwise_conv2d_15"
+  arguments: "activation_15"
+  arguments: "activation_16"
+  devices: 0
+}
+operations {
+  op_name: "CONV_2D_op151"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_MBZCFTDREZ"
+  input_tensors: "activation_16"
+  output_tensors: "classificator_16"
+  arguments: "activation_16"
+  arguments: "classificator_16"
+  devices: 0
+}
+operations {
+  op_name: "CONV_2D_op157"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_conv2d_mangled_JJKQIMZPMP"
+  input_tensors: "activation_16"
+  output_tensors: "regressor_16"
+  arguments: "activation_16"
+  arguments: "regressor_16"
+  devices: 0
+}
+operations {
+  op_name: "RESHAPE_op159"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_reshape_mangled_ZSEAOUFOEG"
+  input_tensors: "classificator_16"
+  output_tensors: "reshape_2"
+  arguments: "classificator_16"
+  arguments: "reshape_2"
+  devices: 0
+  inplace: true
+}
+operations {
+  op_name: "RESHAPE_op161"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_reshape_mangled_LOZELCRSIA"
+  input_tensors: "regressor_16"
+  output_tensors: "reshape_3"
+  arguments: "regressor_16"
+  arguments: "reshape_3"
+  devices: 0
+  inplace: true
+}
+operations {
+  op_name: "CONCATENATION_op162"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_concat_mangled"
+  input_tensors: "reshape"
+  input_tensors: "reshape_2"
+  output_tensors: "classificators"
+  arguments: "reshape"
+  arguments: "reshape_2"
+  arguments: "classificators"
+  devices: 0
+}
+operations {
+  op_name: "CONCATENATION_op163"
+  kernel_path: "modelout.so"
+  kernel_symbol: "_mlir_ciface_concat_mangled_YZRLROSUAF"
+  input_tensors: "reshape_1"
+  input_tensors: "reshape_3"
+  output_tensors: "regressors"
+  arguments: "reshape_1"
+  arguments: "reshape_3"
+  arguments: "regressors"
+  devices: 0
+}
+tensors {
+  name: "input"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 128
+  shapes: 128
+  shapes: 3
+  padding: 3
+}
+tensors {
+  name: "conv2d"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 24
+}
+tensors {
+  name: "activation"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 24
+  padding: 24
+}
+tensors {
+  name: "depthwise_conv2d"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 24
+  padding: 24
+}
+tensors {
+  name: "activation_1"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 24
+  padding: 24
+}
+tensors {
+  name: "depthwise_conv2d_1"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 24
+  padding: 24
+}
+tensors {
+  name: "channel_padding"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 28
+  padding: 24
+}
+tensors {
+  name: "activation_2"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 64
+  shapes: 64
+  shapes: 28
+  padding: 28
+}
+tensors {
+  name: "depthwise_conv2d_2"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 28
+  padding: 28
+}
+tensors {
+  name: "channel_padding_1"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 32
+  padding: 28
+}
+tensors {
+  name: "activation_3"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 32
+  padding: 32
+}
+tensors {
+  name: "depthwise_conv2d_3"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 32
+  padding: 32
+}
+tensors {
+  name: "channel_padding_2"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 36
+  padding: 32
+}
+tensors {
+  name: "activation_4"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 36
+  padding: 36
+}
+tensors {
+  name: "depthwise_conv2d_4"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 36
+  padding: 36
+}
+tensors {
+  name: "channel_padding_3"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 42
+  padding: 36
+}
+tensors {
+  name: "activation_5"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 32
+  shapes: 32
+  shapes: 42
+  padding: 42
+}
+tensors {
+  name: "depthwise_conv2d_5"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 42
+  padding: 42
+}
+tensors {
+  name: "channel_padding_4"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 48
+  padding: 42
+}
+tensors {
+  name: "activation_6"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 48
+  padding: 48
+}
+tensors {
+  name: "depthwise_conv2d_6"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 48
+  padding: 48
+}
+tensors {
+  name: "channel_padding_5"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 56
+  padding: 48
+}
+tensors {
+  name: "activation_7"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 56
+  padding: 56
+}
+tensors {
+  name: "depthwise_conv2d_7"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 56
+  padding: 56
+}
+tensors {
+  name: "channel_padding_6"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 64
+  padding: 56
+}
+tensors {
+  name: "activation_8"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 64
+  padding: 64
+}
+tensors {
+  name: "depthwise_conv2d_8"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 64
+  padding: 64
+}
+tensors {
+  name: "channel_padding_7"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 72
+  padding: 64
+}
+tensors {
+  name: "activation_9"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 72
+  padding: 72
+}
+tensors {
+  name: "depthwise_conv2d_9"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 72
+  padding: 72
+}
+tensors {
+  name: "channel_padding_8"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 80
+  padding: 72
+}
+tensors {
+  name: "activation_10"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 80
+  padding: 80
+}
+tensors {
+  name: "depthwise_conv2d_10"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 80
+  padding: 80
+}
+tensors {
+  name: "channel_padding_9"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 88
+  padding: 80
+}
+tensors {
+  name: "activation_11"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 88
+  padding: 88
+}
+tensors {
+  name: "depthwise_conv2d_11"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 88
+  padding: 88
+}
+tensors {
+  name: "classificator_8"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 2
+}
+tensors {
+  name: "regressor_8"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 16
+  shapes: 16
+  shapes: 32
+}
+tensors {
+  name: "channel_padding_10"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 88
+}
+tensors {
+  name: "reshape"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 512
+  shapes: 1
+}
+tensors {
+  name: "reshape_1"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 512
+  shapes: 16
+}
+tensors {
+  name: "activation_12"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "depthwise_conv2d_12"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "activation_13"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "depthwise_conv2d_13"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "activation_14"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "depthwise_conv2d_14"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "activation_15"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "depthwise_conv2d_15"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "activation_16"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+  padding: 96
+}
+tensors {
+  name: "classificator_16"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 6
+}
+tensors {
+  name: "regressor_16"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 8
+  shapes: 8
+  shapes: 96
+}
+tensors {
+  name: "reshape_2"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 384
+  shapes: 1
+}
+tensors {
+  name: "reshape_3"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 384
+  shapes: 16
+}
+tensors {
+  name: "classificators"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 896
+  shapes: 1
+}
+tensors {
+  name: "regressors"
+  element_type: ELEMENT_TYPE_F32
+  alignment: 64
+  shapes: 1
+  shapes: 896
+  shapes: 16
+}
+input_tensors: "input"
+output_tensors: "regressors"
+output_tensors: "classificators"

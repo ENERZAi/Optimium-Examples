@@ -1,0 +1,36 @@
+// depthwise convolution opus implemenation
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module common.layerparams as lparams
+module linear.linear_impl as impl
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 256 }]
+fun linear(mut &inputs : input_t, mut &outputs : output_t) -> i32 {
+    impl.linear_impl</attr_params, optim_params, layer_params, 
+    input_data, input_dtypes, input_shapes, input_scales, input_zero_points,
+    output_dtypes, output_shapes, output_scales, output_zero_points,
+    input_edges, output_edges, ismainops,
+    input_t, input_rt_list, output_t, output_rt_list/>(&inputs, &outputs)
+}
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Optimization : {VectorSize : 512}]
+fun linear_internal(mut &inputs : input_t, mut &outputs : output_t) -> i32 {
+    impl.linear_impl</attr_params, optim_params, layer_params, 
+    input_data, input_dtypes, input_shapes, input_scales, input_zero_points,
+    output_dtypes, output_shapes, output_scales, output_zero_points,
+    input_edges, output_edges, ismainops,
+    input_t, input_rt_list, output_t, output_rt_list/>(&inputs, &outputs)
+}
+
+_end_

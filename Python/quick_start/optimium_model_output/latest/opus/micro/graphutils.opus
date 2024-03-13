@@ -1,0 +1,175 @@
+module core.List.List as ll
+
+let toMainEdgeList input_edges output_edges ismainlist =
+    // find edges to main layer
+    // if edge is connected to main: true, else: false
+    let rec init_tomains_micro index edges ismain = 
+        if(index == (ll.len edges)){
+            []
+        } else{
+            ismain; init_tomains_micro (index + 1) edges ismain
+        }
+    let rec init_tomains index edges_list =
+        if(index == (ll.len edges_list)){
+            []
+        } else{
+            let edges = ll.item index edges_list
+            let ismain = ll.item index ismainlist
+            let out = init_tomains_micro 0 edges ismain
+            out; (init_tomains (index + 1) edges_list)
+        }
+    let rec propagate_edges_micro index connected_tomains_list tomains edges =
+        if(index == (ll.len edges)){
+            []
+        } else{
+            let (layer, edge) = ll.item index edges
+            let tomain = ll.item index tomains
+            let ismain =
+                if(layer < 0){
+                    false
+                } else{
+                    // ll.item edge (ll.item layer connected_tomains_list)
+                    let tmp_list = ll.item layer connected_tomains_list
+                    let rec ismainimpl index =
+                        if(index == ll.len tmp_list){
+                            false
+                        } else{
+                            (ll.item index tmp_list) || (ismainimpl (index + 1))
+                        }
+                    ismainimpl 0
+                }
+            tomain || ismain; (propagate_edges_micro (index + 1) connected_tomains_list tomains edges)
+        }
+    let rec propagate_edges index connected_tomains_list tomains_list edges_list =
+        if(index == (ll.len edges_list)){
+            []
+        } else{
+            let edges = ll.item index edges_list
+            let tomains = ll.item index tomains_list
+            let out = propagate_edges_micro 0 connected_tomains_list tomains edges
+            out; (propagate_edges (index + 1) connected_tomains_list tomains_list edges_list)
+        }
+    let rec isconnectedtomain index tomains =
+        if(index == (ll.len tomains)){
+            false
+        } else{
+            let isconnected = ll.item index tomains
+            isconnected || (isconnectedtomain (index + 1) tomains)
+        }
+    let rec propagate_self_micro index tomains edges isconnected =
+        if(index == (ll.len edges)){
+            []
+        } else{
+            let (layer, edge) = ll.item index edges
+            let tomain = ll.item index tomains
+            let isnotconst = if(layer == -1 && edge == -1){false} else{true}
+            ((tomain || isconnected) && (tomain || isnotconst)); (propagate_self_micro (index + 1) tomains edges isconnected)
+        }
+    let rec propagate_self index other_tomains_list tomains_list edges_list =
+        if(index == (ll.len edges_list)){
+            []
+        } else{
+            let edges = ll.item index edges_list
+            let tomains = ll.item index tomains_list
+            let other_tomains = ll.item index other_tomains_list
+            let isconnected = isconnectedtomain 0 other_tomains
+            let out = propagate_self_micro 0 tomains edges isconnected
+            out; (propagate_self (index + 1) other_tomains_list tomains_list edges_list)
+        }
+    let rec propagate index input_tomains output_tomains =
+        let thisinput_edges = ll.item index input_edges
+        let thisoutput_edges = ll.item index output_edges
+        let input_tomains_tmp = propagate_edges 0 input_tomains input_tomains input_edges
+        let output_tomains_tmp = propagate_edges 0 output_tomains output_tomains output_edges
+        if(index == (ll.len input_edges - 1)){
+            let input_tomains_new = propagate_self 0 output_tomains_tmp input_tomains_tmp input_edges
+            let output_tomains_new = propagate_self 0 input_tomains_tmp output_tomains_tmp output_edges
+            (input_tomains_new, output_tomains_new)
+        } else{
+            propagate (index + 1) input_tomains_tmp output_tomains_tmp
+        }
+    let init_input_tomains = init_tomains 0 input_edges
+    let init_output_tomains = init_tomains 0 output_edges
+    let (input_tomains, output_tomains) = propagate 0 init_input_tomains init_output_tomains
+    (input_tomains, output_tomains)
+
+let toWhichMainEdgeList input_edges output_edges input_tomains output_tomains ismainlist =
+    // find edges to main layer
+    // if edge is connected to main: true, else: false
+    let rec init_towhichmainedges_micro index edges ismain = 
+        if(index == (ll.len edges)){
+            []
+        } else{
+            let out = if(ismain){index} else{-1}
+            out; init_towhichmainedges_micro (index + 1) edges ismain
+        }
+    let rec init_towhichmainedges index edges_list =
+        if(index == (ll.len edges_list)){
+            []
+        } else{
+            let edges = ll.item index edges_list
+            let ismain = ll.item index ismainlist
+            let out = init_towhichmainedges_micro 0 edges ismain
+            out; (init_towhichmainedges (index + 1) edges_list)
+        }
+    let rec propagate_edges_check_other_edges index towhichedges_list othertomains otheredges =
+        if(index == (ll.len otheredges)){
+            -1
+        } else{
+            let othertomain = ll.item index othertomains
+            let (layer, edge) = ll.item index otheredges
+            let towhichedge = 
+                if(layer >= 0){
+                    ll.item edge (ll.item layer towhichedges_list)
+                } else{
+                    -1
+                }
+            // let ismain = ll.item layer ismainlist
+            if(othertomain){ // main edge info
+                towhichedge
+            } else{
+                propagate_edges_check_other_edges (index + 1) towhichedges_list othertomains otheredges
+            }
+        }
+    let rec propagate_edges_micro index towhichedges_list othertomains otheredges tomains towhichedges =
+        if(index == (ll.len towhichedges)){
+            []
+        } else{
+            let tomain = ll.item index tomains
+            let towhichedge = ll.item index towhichedges
+            if(tomain){
+                let out = propagate_edges_check_other_edges 0 towhichedges_list othertomains otheredges 
+                out; propagate_edges_micro (index + 1) towhichedges_list othertomains otheredges tomains towhichedges
+            } else{
+                towhichedge; propagate_edges_micro (index + 1) towhichedges_list othertomains otheredges tomains towhichedges
+            }
+        }
+    let rec propagate_edges index othertomains_list otheredges_list tomains_list edges_list towhichedges_list =
+        if(index == (ll.len edges_list)){
+            []
+        } else{
+            let otheredges = ll.item index otheredges_list
+            let tomains = ll.item index tomains_list
+            let othertomains = ll.item index othertomains_list
+            let towhichedges = ll.item index towhichedges_list
+            let ismain = ll.item index ismainlist
+            if(ismain){
+                towhichedges; (propagate_edges (index + 1) othertomains_list otheredges_list tomains_list edges_list towhichedges_list)
+            } else{
+                let out = propagate_edges_micro 0 towhichedges_list othertomains otheredges tomains towhichedges
+                out; (propagate_edges (index + 1) othertomains_list otheredges_list tomains_list edges_list towhichedges_list)
+            }
+        }
+    let rec propagate index input_towhichmainedges output_towhichmainedges =
+        let input_towhichmainedges_tmp = propagate_edges 0 output_tomains output_edges input_tomains input_edges input_towhichmainedges
+        let output_towhichmainedges_tmp = propagate_edges 0 input_tomains input_edges output_tomains output_edges output_towhichmainedges
+        if(index == (ll.len input_edges - 1)){
+            (input_towhichmainedges_tmp, output_towhichmainedges_tmp)
+        } else{
+            propagate (index + 1) input_towhichmainedges_tmp output_towhichmainedges_tmp
+        }
+    let init_input_towhichmainedges = init_towhichmainedges 0 input_edges
+    let init_output_towhichmainedges = init_towhichmainedges 0 output_edges
+    let (input_towhichmainedges, output_towhichmainedges) = propagate 0 init_input_towhichmainedges init_output_towhichmainedges
+    (input_towhichmainedges, output_towhichmainedges)
+_end_

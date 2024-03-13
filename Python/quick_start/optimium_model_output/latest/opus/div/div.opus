@@ -1,0 +1,503 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module common.utils as commonutils
+module broadcast.index_utils as broadcast_index_utils
+module micro.fusion as fsn
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun div(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Div x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+        let thislayer_params = 
+            match (ll.item index layer_params) with
+                | params.Div x -> x
+        let (setvarsimpls, premicroopsimpls, postmicroopsimpls, inputpadopsimpls, outputpadopsimpls, loopopsimpls) = fsn.init layer_params input_data input_dtypes input_shapes input_scales input_zero_points output_dtypes output_shapes output_scales output_zero_points input_edges output_edges ismainops
+        
+        // tuple indexing with compile time expr is necessary
+        // when it is supported, it can be updated by more clean coding
+        // check if node is dynamic node or not
+        let input1_dynamic = 
+            match (ll.item 0 (ll.item 0 input_data)) with 
+                | ut.EMPTY -> true
+                | _ -> false
+        let input2_dynamic = 
+            match (ll.item 1 (ll.item 0 input_data)) with 
+                | ut.EMPTY -> true
+                | _ -> false
+
+        // let ((pack,), (unroll,)) = optim_param
+        // for refactoring
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input2_dtype = ll.item 1 (ll.item layerindex input_dtypes)
+        let input1_shape_tmp = ll.item 0 (ll.item layerindex input_shapes)
+        let input2_shape_tmp = ll.item 1 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input2_scales = ll.item 1 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let input2_zero_points = ll.item 1 (ll.item layerindex input_zero_points)
+        let output_dtype = ll.item 0 (ll.item layerindex output_dtypes)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)
+
+        let unsqueeze shape dim =
+            let rec impl index =
+                if(index == dim - 1){
+                    [ll.item 0 shape]
+                } else{
+                    1; impl (index + 1)
+                }
+            impl 0
+        let (input1_shape, input1_shape_fake, input2_shape, input2_shape_fake) = 
+            if((ll.len input1_shape_tmp == 1) && (ll.item 0 input1_shape_tmp == 1)){ // const
+                (unsqueeze input1_shape_tmp (ll.len input2_shape_tmp), input2_shape_tmp, input2_shape_tmp input2_shape_tmp)
+            } else if((ll.len input2_shape_tmp == 1) && (ll.item 0 input2_shape_tmp == 1)){ // const
+                (input1_shape_tmp, input1_shape_tmp, unsqueeze input2_shape_tmp (ll.len input1_shape_tmp), input1_shape_tmp)
+            } else{
+                (input1_shape_tmp, input1_shape_tmp, input2_shape_tmp, input2_shape_tmp)
+            }
+
+        let _ = if((ll.len input1_shape) != ll.len (input2_shape)){
+            except("input1 and input2 must have same dimension")
+        } else{
+            _end_
+        }
+
+        let (maxlen, minlen, maxinput) = broadcast_index_utils.get_maxmin_len_binary <| input1_shape_fake <| input2_shape_fake
+
+        let get_input1_dim index = broadcast_index_utils.get_input_dim <| "input1" <| maxinput <| maxlen <| minlen <| input1_shape_fake <| index
+        let get_input2_dim index = broadcast_index_utils.get_input_dim <| "input2" <| maxinput <| maxlen <| minlen <| input2_shape_fake <| index
+
+        // argument valid check - TODO - consider when the number of dimensions are different
+        let maxshape index = 
+            if(ll.item index input1_shape_fake > ll.item index input2_shape_fake){
+                ll.item index input1_shape_fake
+            } else{
+                ll.item index input2_shape_fake
+            }
+        let rec broadcasting index =
+            if(index + 1 == (ll.len input1_shape_fake)){
+                let s1 = ll.item index input1_shape_fake
+                let s2 = ll.item index input2_shape_fake
+                if(s1 == s2 || s1 == 1 || s2 == 1){
+                    (true, [maxshape index])
+                } else{
+                    (false, [maxshape index])
+                }
+            } else{
+                let s1 = ll.item index input1_shape_fake
+                let s2 = ll.item index input2_shape_fake
+                let thisbool = if(s1 == s2 || s1 == 1 || s2 == 1){
+                    true
+                } else{
+                    false
+                }
+                let thismaxshape = [maxshape index]
+                let (nextbool, nextmaxshape) = broadcasting (index + 1)
+                (thisbool && nextbool, ll.concat thismaxshape nextmaxshape)
+            }
+        
+        let (canbroadcasting, broadcastingshape) = broadcasting 0
+        
+        let _ = if (!canbroadcasting){
+            except("broadcasting with " + toStr(input1_shape) + " and " + toStr(input2_shape) + "is not possible")
+        } else{
+            _end_
+        }
+
+        for (i from 0 to (ll.len output_shape)){
+            if(ll.item i output_shape == ll.item i broadcastingshape){
+                _end_
+            } else{
+                except("output shape(" + toStr(output_shape) + ") is not compatible with expected shape(" + toStr(broadcasting) + "}")
+            }
+        }
+
+        
+        let (broadcast_dim, nonbroadcast_dim) = broadcast_index_utils.check_broadcast_dim <| maxlen <| minlen <| get_input1_dim <| get_input2_dim <| 0i    // output dimension 기준의 index - dimension 길이가 다를 때 고려
+
+        let (last_consecutive_dim_rank_in_next_nonbroadcast, last_consecutive_dim) = if ((ll.len <| nonbroadcast_dim) == 0){
+            // all dimension is broadcast
+            (-1, maxlen - 1)
+        } else{
+            if ((ll.item <| ((ll.len <| nonbroadcast_dim)-1) <| nonbroadcast_dim) != (maxlen-1)){
+                // last dimension is broadcast
+                (-1, maxlen - 1)
+            }  else{
+                broadcast_index_utils.getting_consectuvie_dim <| nonbroadcast_dim <|  ((ll.len <| nonbroadcast_dim) - 2i) <| (ll.item <| ((ll.len <| nonbroadcast_dim) - 1i) <| nonbroadcast_dim)
+            }
+        }
+        // let (last_consecutive_dim_rank_in_next_nonbroadcast, last_consecutive_dim) = broadcast_index_utils.getting_consectuvie_dim <| nonbroadcast_dim <|  ((ll.len <| nonbroadcast_dim) - 2i) <| (ll.item <| ((ll.len <| nonbroadcast_dim) - 1i) <| nonbroadcast_dim)
+
+        let reshaped_input1_shape = if(maxinput == "input1"){
+            broadcast_index_utils.get_consecutive_flattend_shape <| 0i <| input1_shape <| last_consecutive_dim
+        } else{
+            broadcast_index_utils.get_consecutive_flattend_shape <| (maxlen - minlen) <| input1_shape <| last_consecutive_dim
+        }
+        // let _ = except("NONO")
+        let reshaped_input2_shape = if(maxinput == "input2"){
+            broadcast_index_utils.get_consecutive_flattend_shape <| 0i <| input2_shape <| last_consecutive_dim
+        } else{
+            broadcast_index_utils.get_consecutive_flattend_shape <| (maxlen - minlen) <| input2_shape <| last_consecutive_dim
+        }
+        let reshaped_output_shape = broadcast_index_utils.get_consecutive_flattend_shape <| 0i <| output_shape <| last_consecutive_dim
+
+        let (reshaped_maxlen, reshaped_minlen, _) = broadcast_index_utils.get_maxmin_len_binary <| reshaped_input1_shape <| reshaped_input2_shape
+        let get_reshaped_input1_dim index = broadcast_index_utils.get_input_dim <| "input1" <| maxinput <| reshaped_maxlen <| reshaped_minlen <| reshaped_input1_shape <| index
+        let get_reshaped_input2_dim index = broadcast_index_utils.get_input_dim <| "input2" <| maxinput <| reshaped_maxlen <| reshaped_minlen <| reshaped_input2_shape <| index
+
+        // For now, it is not used but it would be when new algorithm with loop reordering so that outermost loops takes all parallel is implemented
+        // 즉, 바깥쪽에 모두 parallel loop를 두고 안쪽에 모두 broadcasting loop를 두기 위함 -> add에도 의미가 있으려나 - reduction 에는 의미 있다 - 나중에 없으면 제거하기
+        let (reshaped_broadcast_dim, reshaped_nonbroadcast_dim) = broadcast_index_utils.check_broadcast_dim <| reshaped_maxlen <| reshaped_minlen <| get_reshaped_input1_dim <| get_reshaped_input2_dim <| 0i
+
+        let lastshape1 = ll.item (ll.len reshaped_input1_shape - 1) reshaped_input1_shape
+        let lastshape2 = ll.item (ll.len reshaped_input2_shape - 1) reshaped_input2_shape
+        let _ = if((pack * unroll > lastshape1) && (pack * unroll > lastshape2)){
+            except("pack * unroll(" + toStr(pack * unroll) + ") should be larger than one of the shape of last dimension of input1(" + toStr(lastshape1) + ") and input2(" + toStr(lastshape2) + ")")
+        } else{
+            _end_
+        }
+
+        let lastshapeoutput = ll.item (ll.len reshaped_output_shape - 1) reshaped_output_shape
+        let tiles =
+            if(lastshapeoutput % (pack * unroll) == 0){
+                [(0, lastshapeoutput); (lastshapeoutput, lastshapeoutput)]
+            } else{
+                let end1 = lastshapeoutput - (lastshapeoutput % (pack * unroll) )
+                [(0, end1); (end1, lastshapeoutput)]
+            }
+
+        let (index_offset_input1, index_offset_input2) = if (maxinput == "input1"){
+            (0, reshaped_maxlen-reshaped_minlen)
+        }else{
+            (reshaped_maxlen - reshaped_minlen, 0)
+        }
+
+        let rec tile_concat new_item list_list index =
+            if (index == ll.len list_list){
+                []
+            } else{
+                (new_item ; ll.item <| index <| list_list) ; (tile_concat <| new_item <| list_list <| (index+1))
+            }
+
+        let rec getindexlist index_offset index shape tile pack =
+            // return index list and number of elements list (for fusion later)
+            if(index + 1 == ll.len shape){
+                let lastshape = ll.item index shape
+                let (start, end) = tile
+                if(lastshape == 1){ // broadcasting
+                    ([[!{0:1:1}]], [[1]])
+                } else if(start == 0){ // first tile
+                    if(unroll == 1){
+                        let res = [[!{${"idx" + toStr(index)}:${"idx" + toStr(index)} + ${pack}:1}]]
+                        (res, [[pack]])
+                    } else{
+                        let rec inside_impl inside_index =
+                            if (inside_index == unroll){
+                                []
+                            } else{
+                                let res = [!{(${"idx" + toStr(index)} + ${pack}*${inside_index}):${"idx" + toStr(index)} + ${pack} * ${inside_index + 1}:1}] ; (inside_impl <| (inside_index+1i))
+                                res
+                            }
+                        let res = inside_impl <| 0
+                        let rec return_num inside_index =
+                            if (inside_index == unroll){
+                                []
+                            } else{
+                                [pack]; (return_num <| (inside_index + 1))
+                            }
+                        (res, return_num <| 0)
+                    }
+                    
+                } else{ // second tile
+                    
+                    if (unroll == 1){
+                        let res = [[!{${"idx" + toStr(index)}:${"idx" + toStr(index)} + ${end - start}:1}]]
+                        (res, [[end-start]])
+                    } else{
+                        let rec inside_impl inside_start =
+                            if ((inside_start + pack) < (end-start)){
+                                let res = [!{(${"idx" + toStr(index)}+${inside_start}):${"idx" + toStr(index)} + ${inside_start + pack}:1}] ; (inside_impl <| (inside_start + pack))
+                                res
+                            } else{
+                                let res = [[!{(${"idx" + toStr(index)} + ${inside_start}):${"idx" + toStr(index)} + ${end - start}:1}]]
+                                res
+                            }
+                        let res  = inside_impl <| 0
+                        let rec return_num inside_start = 
+                            if ((inside_start + pack) < (end-start)){
+                                [pack] ; (return_num <| (inside_start + pack))
+                            } else{
+                                [[end-start-inside_start]]
+                            }
+                        (res, return_num <| 0)
+                    }
+                }
+                
+            } else if (index < index_offset){
+                let (res, num) = getindexlist <| index_offset <| (index+1i) <| index_shape <| tile <| pack
+                (res, num)
+            }else{
+
+                let thisshape = ll.item index shape
+                if(thisshape == 1){ // broadcasting
+                    let (postres, postnum) =  getindexlist <| index_offset <| (index + 1) <| shape <| tile <| pack
+                    // let res = tile_concat !{0:1:1} postres 0 
+                    let res = tile_concat !{0} postres 0 
+                    let num = tile_concat 1 postnum 0
+                    (res, num)
+                } else{
+                    let (preres, prenum) = (getindexlist index_offset (index + 1) shape tile pack)
+                    // let res = tile_concat <| !{${"idx" + toStr(index)}:${"idx" + toStr(index)} + 1:1} <| preres <| 0
+                    let res = tile_concat <| !{${"idx" + toStr(index)}} <| preres <| 0
+                    let num = tile_concat <| 1 <| prenum <| 0
+                    (res, num)
+                } 
+            }
+
+        let (input1indexlist, _) = getindexlist index_offset_input1 0 reshaped_input1_shape (ll.item 0 tiles) pack
+        let (input2indexlist, _) = getindexlist index_offset_input2 0 reshaped_input2_shape (ll.item 0 tiles) pack
+        let (outputindexlist, outputnum) = getindexlist 0 0 reshaped_output_shape (ll.item 0 tiles) pack
+        let (input1indexlist2, _) = getindexlist index_offset_input1 0 reshaped_input1_shape (ll.item 1 tiles) pack
+        let (input2indexlist2, _) = getindexlist index_offset_input2 0 reshaped_input2_shape (ll.item 1 tiles) pack
+        let (outputindexlist2, outputnum2) = getindexlist 0 0 reshaped_output_shape (ll.item 1 tiles) pack
+
+        let isQuant = if(input1_dtype == rtType(i8)){true} else{false}
+
+        let tensordim = ll.len reshaped_output_shape
+
+        ///fusion
+        let idxlist = 
+            let rec impl index =
+                if(index == ll.len (ll.item 0 input1indexlist)){
+                    []
+                } else{
+                    let out = !{${"idx" + toStr(index)}}
+                    out; impl (index + 1)
+                }
+            impl 0
+
+
+        let rec gen_unroll_expr oindex i1index i2index idxlist tile onum index = 
+            let input1name = "input1_" + toStr(index)
+            let input2name = "input2_" + toStr(index)
+            let accname = "acc" + toStr(index)
+            let vectorsize = ll.item 0 (ll.item index onum)
+            let vectordtype = output_dtype
+            let fusedExpr = fsn.genMicroOpsExpr postmicroopsimpls accname accname idxlist vectorsize vectordtype
+            let postfusionExpr nextop = 
+                !{
+                    batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- ${accname}
+                    ${nextop}
+                }
+            let expr nextop = 
+                !{
+                    let mut ${input1name} = batchinput1[${ll.toRtTuple (ll.item index i1index)}] 
+                    let mut ${input2name} = batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                    let mut ${accname} = ${input1name} /  ${input2name}
+                    // batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- ${accname}
+                    ${fusedExpr (postfusionExpr nextop)}
+                    // batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- batchinput1[${ll.toRtTuple (ll.item index i1index)}] + batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                    // ${nextop}
+                }
+            if (index == ( (ll.len oindex) - 1i)){
+                // !{
+                //     let mut ${input1name} = batchinput1[${ll.toRtTuple (ll.item index i1index)}] 
+                //     let mut ${input2name} = batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                //     let mut ${accname} = ${input1name} +  ${input2name}
+                //     batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- ${accname}
+                //     // batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- batchinput1[${ll.toRtTuple (ll.item index i1index)}] + batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                // }
+                expr (!{_end_})
+            } else{
+                // !{
+                //     let mut ${input1name} = batchinput1[${ll.toRtTuple (ll.item index i1index)}] 
+                //     let mut ${input2name} = batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                //     let mut ${accname} = ${input1name} +  ${input2name}
+                //     batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- ${accname}
+                //     // batchoutput[${ll.toRtTuple (ll.item index oindex)}] <- batchinput1[${ll.toRtTuple (ll.item index i1index)}] + batchinput2[${ll.toRtTuple (ll.item index i2index)}]
+                //     ${gen_unroll_expr <| oindex <| i1index <| i2index <| (index+1i)}
+                // }
+                expr (gen_unroll_expr <| oindex <| i1index <| i2index <| idxlist <| tile <| onum <| (index+1i))
+            }
+
+        let rec genExpr index = 
+            if(index == tensordim - 1){
+                let (start, end) =  ll.item 0 tiles
+                let (start2, end2) = ll.item 1 tiles
+                let expr1 = 
+                    if(isQuant){
+                        !{
+                            let input1 = (mult1 * (cast<i32>(batchinput1[${ll.toRtTuple input1indexlist}]) - input1_zero_points))
+                            let input2 = (mult2 * (cast<i32>(batchinput2[${ll.toRtTuple input2indexlist}]) - input2_zero_points))
+                            let add = (input1 + input2 + (tensor((1,), 1) << (shift1 - tensor((1,), 1)))) >> shift1
+                            batchoutput[${ll.toRtTuple outputindexlist}] <- cast<i8>(add + output_zero_points)
+                        }
+                    } else{
+                        // let rec impl index = 
+                        //     if (index == ( (ll.len outputindexlist) - 1i)){
+                        //         !{batchoutput[${ll.toRtTuple (ll.item index outputindexlist)}] <- batchinput1[${ll.toRtTuple (ll.item index input1indexlist)}] + batchinput2[${ll.toRtTuple (ll.item index input2indexlist)}]}
+                        //     } else{
+                        //         !{
+                        //             batchoutput[${ll.toRtTuple (ll.item index outputindexlist)}] <- batchinput1[${ll.toRtTuple (ll.item index input1indexlist)}] + batchinput2[${ll.toRtTuple (ll.item index input2indexlist)}]
+                        //             ${impl <| (index+1i)}
+                        //         }
+                        //     }
+                        gen_unroll_expr <| outputindexlist <| input1indexlist <| input2indexlist <| idxlist <| (ll.item 0 tiles) <| outputnum <| 0
+                    }
+                if(end2 - start2 > 0){
+                    let expr2 = 
+                        if(isQuant){
+                            !{
+                                let input1 = (mult1 * (cast<i32>(batchinput1[${ll.toRtTuple input1indexlist2}]) - input1_zero_points))
+                                let input2 = (mult2 * (cast<i32>(batchinput2[${ll.toRtTuple input2indexlist2}]) - input2_zero_points))
+                                let add = (input1 + input2 + (tensor((1,), 1) << (shift1 - tensor((1,), 1)))) >> shift1
+                                batchoutput[${ll.toRtTuple outputindexlist2}] <- cast<i8>(add + output_zero_points)
+                            }
+                        } else{
+                            // let rec impl index = 
+                            //     if (index == ( (ll.len outputindexlist2) - 1i)){
+                            //         !{batchoutput[${ll.toRtTuple (ll.item index outputindexlist2)}] <- batchinput1[${ll.toRtTuple (ll.item index input1indexlist2)}] + batchinput2[${ll.toRtTuple (ll.item index input2indexlist2)}]}
+                            //     } else{
+                            //         !{
+                            //             batchoutput[${ll.toRtTuple (ll.item index outputindexlist2)}] <- batchinput1[${ll.toRtTuple (ll.item index input1indexlist2)}] + batchinput2[${ll.toRtTuple (ll.item index input2indexlist2)}]
+                            //             ${impl <| (index+1i)}
+                            //         }
+                            //     }
+                            //     // !{batchoutput[${ll.toRtTuple outputindexlist2}] <- batchinput1[${ll.toRtTuple input1indexlist2}] + batchinput2[${ll.toRtTuple input2indexlist2}]}
+                            gen_unroll_expr <| outputindexlist2 <| input1indexlist2 <| input2indexlist2 <| idxlist <| (ll.item 1 tiles) <| outputnum2 <| 0
+                        }
+                    !{
+                        for(${"idx" + toStr(index)} from 0 to ${end} step ${pack} * ${unroll}){
+                            ${expr1}
+                        }
+                        for(${"idx" + toStr(index)} from ${start2} to ${end2} step ${end2 - start2}){
+                            ${expr2}
+                        }
+                        0
+                    }
+                } else{
+                    !{
+                        for(${"idx" + toStr(index)} from 0 to ${end} step ${pack} * ${unroll}){
+                            ${expr1}
+                        }
+                        0
+                    }
+                }
+            } else{
+                !{
+                    for(${"idx" + toStr(index)} from 0 to ${ll.item index reshaped_output_shape} step 1){
+                        ${genExpr (index + 1)}
+                    }
+                    ${
+                        if(index == 0){
+                            !{0}
+                        } else{
+                            !{_end_}
+                        }
+                    }
+                }
+            }
+
+        let setVarsExpr = fsn.genSetVarsExpr setvarsimpls (["batchinput1"; "batchinput2"]) (["batchoutput"]) ([reshaped_input1_shape; reshaped_input2_shape]) ([reshaped_output_shape]) ([false; false])
+
+        if(isQuant){
+            let input1_scales_t = ut.toCtTensorF32 input1_scales
+            let input2_scales_t = ut.toCtTensorF32 input2_scales
+            let output_scales_t = ut.toCtTensorF32 output_scales
+            let (mult1, shift1) = ut.multf32toi32 (ut.TensorF32 (input1_scales_t / output_scales_t)) 16
+            let (mult2, shift2) = ut.multf32toi32 (ut.TensorF32 (input2_scales_t / output_scales_t)) 16
+
+            !{
+                let mut batchoutput = reshapeTo(${ll.toRtTuple reshaped_output_shape}, &outputs[|0|])
+                let batchinput1 = ${
+                    if(input1_dynamic){
+                        !{
+                            reshapeTo(${ll.toRtTuple reshaped_input1_shape}, inputs[|0|])
+                            
+                        }
+                    } else{
+                        !{
+                            let datainput1 = ${ut.toRtTensor <| (ll.item 0 (ll.item 0 input_data))}
+                            reshapeTo(${ll.toRtTuple reshaped_input1_shape}, datainput1)
+                            
+                        }
+                    }
+                }
+                let batchinput2 = ${
+                    if(input2_dynamic){
+                        !{
+                            reshapeTo(${ll.toRtTuple reshaped_input2_shape}, inputs[|1|])
+                            
+                        }
+                    } else{
+                        !{
+                            let datainput2 = ${ut.toRtTensor <| (ll.item 1 (ll.item 0 input_data))}
+                            reshapeTo(${ll.toRtTuple reshaped_input2_shape}, datainput2)
+                            
+                        }
+                    }
+                }
+                let mult1 = ${ut.toRtTensor mult1}
+                let shift1 = ${ut.toRtTensor shift1}
+                let mult2 = ${ut.toRtTensor mult2}
+                let shift2 = ${ut.toRtTensor shift2}
+                let input1_zero_points = ${ut.toRtTensor input1_zero_points}
+                let input2_zero_points = ${ut.toRtTensor input2_zero_points}
+                let output_zero_points = ${ut.toRtTensor output_zero_points}
+
+                ${genExpr 0}
+            }
+
+        } else{
+            !{
+                // let mut batchoutput = reshapeTo(${ll.toRtTuple reshaped_output_shape}, &outputs[|0|])
+                // let batchinput1 = ${
+                //     if(input1_dynamic){
+                //         !{
+                //             reshapeTo(${ll.toRtTuple reshaped_input1_shape}, inputs[|0|])
+                            
+                //         }
+                //     } else{
+                //         !{
+                //             let datainput1 = ${ut.toRtTensor <| (ll.item 0 (ll.item 0 input_data))}
+                //             reshapeTo(${ll.toRtTuple reshaped_input1_shape}, datainput1)
+                            
+                //         }
+                //     }
+                // }
+                // let batchinput2 = ${
+                //     if(input2_dynamic){
+                //         !{
+                //             reshapeTo(${ll.toRtTuple reshaped_input2_shape}, inputs[|1|])
+                //         }
+                //     } else{
+                //         !{
+                //             let datainput2 = ${ut.toRtTensor <| (ll.item 1 (ll.item 0 input_data))}
+                //             reshapeTo(${ll.toRtTuple reshaped_input2_shape}, datainput2)
+                //         }
+                //     }
+                // }
+                ${setVarsExpr (genExpr 0)}
+                
+            }
+        }
+        
+    }
+}

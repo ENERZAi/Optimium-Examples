@@ -1,0 +1,448 @@
+// depthwise convolution opus implemenation
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module conv2d.conv2dhelper as u
+module conv2d.conv2dhelper2 as udw
+module conv2d.conv2dhelper3 as udwp
+module common.layerparams as lparams
+//module linear.linear_impl as impl
+module linear.linear as linear_module
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun conv2d(mut &inputs : input_t, mut &outputs : output_t) -> i32 {
+    // compiletime operations
+    ${
+        print("conv compiletime")
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Conv2d x   -> index <- i
+                    | _                 -> _end_
+            }
+            index
+        )
+        let thislayer_params = 
+            match (ll.item index layer_params) with
+                | params.Conv2d x -> x
+
+        let _ = if (ut.isEmpty (ll.item 1 (ll.item layerindex input_data))){
+            let _ = except("For now dynamic weight is not supported")
+            1
+        } else{
+            1
+        }
+
+        let input_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input_scale = ll.item 0 (ll.item layerindex input_scales)
+        let input_zero_point = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_dtype = ll.item 0 (ll.item layerindex output_dtypes)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scale = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_point = ll.item 0 (ll.item layerindex output_zero_points)
+
+        let weight = ll.item 1 (ll.item layerindex input_data)
+        let weight_shape = ll.item 1 (ll.item layerindex input_shapes)
+        let weight_scales = ll.item 1 (ll.item layerindex input_scales)
+        let weight_zero_points = ll.item 1 (ll.item layerindex input_zero_points)
+        
+        let bias = ll.item 2 (ll.item layerindex input_data)
+        let bias_scales = ll.item 2 (ll.item layerindex input_scales)
+        let bias_zero_points = ll.item 2 (ll.item layerindex input_zero_points)
+
+        let kernel_size = thislayer_params->kernel_size
+        let kh = kernel_size[|0|]
+        let kw = kernel_size[|1|]
+        let framework = thislayer_params->framework
+        // let nchw = thislayer_params->nchw
+        let nchw = false // TEMP
+        let stride = thislayer_params->stride
+        let strh = stride[|0|]
+        let strw = stride[|1|]
+        let padding = thislayer_params->padding
+        let dilation = thislayer_params->dilation
+        let groups = thislayer_params->groups
+        let depth_multiplier = thislayer_params->depth_multiplier
+        let bias_attr = thislayer_params->bias
+        let in_channels = thislayer_params->in_channels
+        let out_channels = thislayer_params->out_channels
+        let bat = ll.item <| 0 <| input_shape  // 4D fixed
+        let inh = ll.item <| 1 <| input_shape  // 4D fixed
+        let inw = ll.item <| 2 <| input_shape
+
+        // when DYNAMIC WEIGHT is support, it should be change
+        let algorithm = optim_params->algorithm
+        if ((kw==1) && (kh==1) && (algorithm != "None")){
+            // Linear
+            // TODO - when one of them is not 1
+            if ((strh==1) && (strw==1)){
+                    // temp
+                    let _ = if(algorithm != "linear"){
+                        except("conv1x1 only support linear for now")
+                    } else{
+                        _end_
+                    }
+                    let (layer, edge) = ll.item 0 (ll.item layerindex input_edges)
+                    let rec getinputrtindex layer edge =
+                        if(layer == -1 && edge >= 0){
+                            edge
+                        } else{
+                            let (layernew, edgenew) = ll.item 0 (ll.item layer input_edges) // caution: only single input support
+                            getinputrtindex layernew edgenew
+                        }
+                    let rtindex = getinputrtindex layer edge
+
+                    // when DYNAMIC WEIGHT is support, it should be change
+                    let type_convert type_t_ = if (type_t_ == rtType(tensor<f32, 4>)){
+                            (rtType(tuple<tensor<f32, 2>>), [rtType(tensor<f32, 2>);], rtType(tuple<tensor<f32, 2>>), [rtType(tensor<f32, 2>);])
+                        } else if(type_t_ == rtType(tensor<f16, 4>)){
+                            (rtType(tuple<tensor<f16, 2>>), [rtType(tensor<f16, 2>);], rtType(tuple<tensor<f16, 2>>), [rtType(tensor<f16, 2>);])
+                        } else if(type_t_ == rtType(tensor<i8, 4>)){
+                            (rtType(tuple<tensor<i8, 2>>), [rtType(tensor<i8, 2>);], rtType(tuple<tensor<i8, 2>>), [rtType(tensor<i8, 2>);])
+                        } else if(type_t_ == rtType(tensor<u8, 4>)){
+                            (rtType(tuple<tensor<u8, 2>>), [rtType(tensor<u8, 2>);], rtType(tuple<tensor<u8, 2>>), [rtType(tensor<u8, 2>);])
+                        } else{
+                            let _ = except("Non supported dtype")
+                            (rtType(tuple<tensor<u8, 2>>), [rtType(tensor<u8, 2>);], rtType(tuple<tensor<u8, 2>>), [rtType(tensor<u8, 2>);])
+                        }
+                    let (input_t_linear, input_rt_list_linear, output_t_linear, output_rt_list_linear) = type_convert <| (ll.item <| rtindex <| input_rt_list)
+
+                    let input_shapes_new = ll.concat (ll.take layerindex input_shapes) (ll.concat ([[[bat*inh*inw ; in_channels]; [in_channels;out_channels]; [out_channels;]]]) (ll.drop <| (layerindex + 1) <| input_shapes))
+                    let output_shapes_new =  ll.concat (ll.take layerindex output_shapes) (ll.concat ([[[bat*inh*inw ; out_channels]]]) (ll.drop <| (layerindex + 1) <| output_shapes))
+                    let layer_params_new = ll.concat (ll.take layerindex layer_params) (ll.concat ([params.Linear(lparams.Linear(framework, in_channels, out_channels, bias_attr))]) (ll.drop (layerindex + 1) layer_params))
+
+                    let input_rt_list_new = ll.concat (ll.take rtindex input_rt_list) (ll.concat input_rt_list_linear (ll.drop (rtindex + 1) input_rt_list))
+                    // let output_rt_list_new = ll.concat (ll.take rtindex output_rt_list) (ll.concat output_rt_list_linear (ll.drop (rtindex + 1) output_rt_list))
+                    let output_rt_list_new = output_rt_list_linear
+                    let input_t_new = ll.toRtTupleTy input_rt_list_new
+                    let output_t_new = ll.toRtTupleTy output_rt_list_new
+
+                    let output_new_list = 
+                        let rec impl index =
+                            if(index == ll.len output_rt_list){
+                                []
+                            } else{
+                                if(index == rtindex){
+                                    !{reshapeTo((${bat*inh*inw}, ${out_channels}), &outputs[|${index}|])}; impl (index + 1)
+                                } else{
+                                    !{&outputs[|${index}|]}; impl (index + 1)
+                                }
+                            }
+                        impl 0
+                    let input_new_list = 
+                        let rec impl2 index =
+                            if(index == ll.len input_rt_list){
+                                []
+                            } else{
+                                if(index == rtindex){
+                                    !{reshapeTo((${bat*inh*inw}, ${in_channels}), &inputs[|${index}|])}; impl2 (index + 1)
+                                } else{
+                                    !{&inputs[|${index}|]}; impl2 (index + 1)
+                                }
+                            }
+                        impl2 0
+
+                    !{
+                        let mut reshaped_input_linear = ${ll.toRtTuple input_new_list} // (reshapeTo((${bat*inh*inw}, ${in_channels}), inputs[|0|]),)
+                        let mut reshaped_output_linear = ${ll.toRtTuple output_new_list} // (reshapeTo((${bat*inh*inw}, ${out_channels}), &outputs[|0|]),)
+                        linear_module.linear_internal</params.Attributes("", attr_params->num_threads),
+                                            // optim_params, [params.Linear(lparams.Linear(framework, in_channels, out_channels, bias_attr));],
+                                            optim_params, layer_params_new,
+                                            input_data, input_dtypes, input_shapes_new, 
+                                            input_scales, input_zero_points,   // CAUTION : tensorwise-scheme 
+                                            output_dtypes, output_shapes_new,
+                                            output_scales, output_zero_points, // CAUTION : tensorwise-scheme
+                                            input_edges, output_edges, ismainops,
+                                            input_t_new, input_rt_list_new, output_t_new, output_rt_list_new/>(&reshaped_input_linear, &reshaped_output_linear)
+                    }
+            } else{
+                let _ = except("Slice should be called")
+                !{
+                    0
+                }
+            }
+        } else{
+            // Indirect
+            let _ = if(algorithm == "linear"){
+                except("non pointwise only support indirect buffer for now")
+            } else{
+                _end_
+            }
+            let pack = (ll.item 0 (optim_params->pack), ll.item 1 (optim_params->pack))
+            let unroll = (ll.item 0 (optim_params->unroll), ll.item 1 (optim_params->unroll), ll.item 2 (optim_params->unroll), ll.item 3 (optim_params->unroll))
+            let (packinch, packoutch) = pack
+            let (unrollrow, unrollcol, unrollinch, unrolloutch) = unroll
+            // let nchw = optim_params->nchw
+
+            let input_shape_tuple = (ll.item 0 input_shape, ll.item 1 input_shape, ll.item 2 input_shape, ll.item 3 input_shape)
+            let output_shape_tuple = (ll.item 0 output_shape, ll.item 1 output_shape, ll.item 2 output_shape, ll.item 3 output_shape)
+            let weight_shape_tuple = (ll.item 0 weight_shape, ll.item 1 weight_shape, ll.item 2 weight_shape, ll.item 3 weight_shape)
+            let (_, inrows, incols, inch) = input_shape_tuple
+            let (_, outrows, outcols, outch) = output_shape_tuple
+
+            let _ = if(unrollrow > outrows){
+                except("unroll along output row axis(" + toStr(unrollrow) + ") should be smaller than outrows(" + toStr(outrows) + ")")
+            } else if(unrollcol > outcols){
+                except("unroll along output col axis(" + toStr(unrollcol) + ") should be smaller than outcols(" + toStr(outcols) + ")")
+            } else{
+                _end_
+            }
+
+            let _ = if(packinch * unrollinch > inch){
+                except("input channel(" + toStr(inch) + ") should be bigger than packinch * unrollinch(" + toStr(packinch * unrollinch) + ")")
+            } else{
+                _end_
+            }
+
+            let _ = if(packoutch * unrolloutch > outch){
+                except("output channel(" + toStr(outch) + ") should be bigger than packoutch * unrolloutch(" + toStr(packoutch * unrolloutch) + ")")
+            } else{
+                _end_
+            }
+
+            let depthwise = if((thislayer_params->in_channels) * depth_multiplier == (thislayer_params->out_channels) && groups == (thislayer_params->in_channels)) {true} else {false}
+
+            let templateparams = u.TemplateParameters(
+                attr_params, optim_params, layer_params,
+                input_data, input_dtypes, input_shapes, input_scales, input_zero_points,
+                output_dtypes, output_shapes, output_scales, output_zero_points,
+                input_edges, output_edges, ismainops,
+                input_rt_list, output_rt_list
+                )
+
+            if(depthwise){
+                if(depth_multiplier == 1){
+                    let _ = if (packinch > 1){
+                        except("depthwise with depth multiplier=1 does not use pack[0]")
+                    } else{
+                        _end_
+                    }
+                    let internalparams = u.InternalParameters(stride, padding, dilation, depth_multiplier, 1, 
+                        input_t, input_dtype, input_shape_tuple, input_scale, input_zero_point, 
+                        output_t, output_dtype, output_shape_tuple, output_scale, output_zero_point, 
+                        weight, weight_shape_tuple, weight_scales, weight_zero_points,
+                        bias, bias_scales, bias_zero_points, framework, nchw, depthwise, (unroll[|0|], unroll[|1|], unroll[|3|], unroll[|3|]), (pack[|1|], pack[|1|]))
+                    // let params = u.initCodeGen templateparams internalparams
+                    // let idxs = u.Indexes(0, 0, 0)
+                    // let tree =  u.Op(u.setBatchInputOutputExpr,
+                    //             u.Op(u.setBiasExpr, 
+                    //             u.Op(u.setWeightExpr, 
+                    //             u.Op(u.setInputpatternExpr,
+                    //             u.Op(u.setMultShiftExpr,
+                    //             u.Op(u.setZeropointsExpr,
+                    //             u.Op(u.setPadExpr,
+                    //             u.Block(u.batchLoopExpr,
+                    //                 u.Block(u.tiledInputPatternLoopExpr,
+                    //                     u.Op(u.setWeightidxExpr,
+                    //                     u.Block(u.tiledOutputChannelLoopExpr,
+                    //                         u.Op(u.unrolledLoadSumExpr,
+                    //                         u.Op(u.unrolledSetInputpatternidxExpr,
+                    //                         u.Block(u.weightLoopExpr,
+                    //                             u.Op(u.unrolledInputSubviewExpr,
+                    //                             u.Op(u.unrolledLoadInputWeightAndFMAExpr,
+                    //                             u.Op(u.unrolledUpdateInputpatternidxExpr,
+                    //                             u.End(u.endExpr)))),
+                    //                         u.Op(u.unrolledStoreExpr,
+                    //                         u.End(u.endExpr))))),
+                    //                     u.End(u.endExpr))),
+                    //                 u.End(u.endExpr)),
+                    //             u.End(u.zeroExpr)))))))))
+
+                    // u.genRuntimeCode params idxs tree
+
+                    let params = udw.initCodeGen templateparams internalparams
+                    let idxs = udw.Indexes(0, 0, 0)
+                    let tree =  udw.Op(udw.setBatchInputOutputExpr,
+                                udw.Op(udw.setBiasExpr, 
+                                udw.Op(udw.setWeightExpr, 
+                                udw.Op(udw.setInputpatternExpr,
+                                udw.Op(udw.setMultShiftExpr,
+                                udw.Op(udw.setZeropointsExpr,
+                                udw.Op(udw.setPadExpr,
+                                udw.Block(udw.batchLoopExpr,
+                                    udw.Block(udw.tiledInputPatternLoopExpr,
+                                        udw.Op(udw.setWeightidxExpr,
+                                        udw.Op(udw.unrolledSetOutputidxExpr,
+                                        udw.Op(udw.unrolledInputSubviewExpr,
+                                        udw.Block(udw.tiledOutputChannelLoopExpr,
+                                            udw.Op(udw.unrolledLoadSumExpr,
+                                            udw.Op(udw.unrolledLoadInputWeightAndFMAExpr,
+                                            // udw.Op(udw.unrolledUpdateInputpatternidxExpr,
+                                            udw.Op(udw.unrolledStoreExpr,
+                                            udw.End(udw.endExpr)))),
+                                        udw.End(udw.endExpr))))),
+                                    udw.End(udw.endExpr)),
+                                udw.End(udw.zeroExpr)))))))))
+
+                    udw.genRuntimeCode params idxs tree
+
+                    // let params = udwp.initCodeGen templateparams internalparams let idxs = udwp.Indexes(0, 0, 0)
+                    // let tree =  udwp.Op(udwp.setBatchInputOutputExpr,
+                    //             udwp.Op(udwp.setBiasExpr, 
+                    //             udwp.Op(udwp.setWeightExpr, 
+                    //             udwp.Op(udwp.setInputpatternExpr,
+                    //             udwp.Op(udwp.setMultShiftExpr,
+                    //             udwp.Op(udwp.setZeropointsExpr,
+                    //             udwp.Op(udwp.setPadExpr,
+                    //             udwp.Block(udwp.batchLoopExpr,
+                    //                 udwp.Block(udwp.tiledInputPatternLoopExpr,
+                    //                     udwp.Op(udwp.setWeightidxExpr,
+                    //                     udwp.Op(udwp.unrolledSetOutputidxExpr,
+                    //                     udwp.Op(udwp.unrolledInputSubviewExpr,
+                    //                     udwp.Block(udwp.tiledOutputChannelLoopExpr,
+                    //                         udwp.Op(udwp.unrolledLoadSumExpr,
+                    //                         udwp.Op(udwp.unrolledLoadInputWeightAndFMAExpr,
+                    //                         // udwp.Op(udwp.unrolledUpdateInputpatternidxExpr,
+                    //                         udwp.Op(udwp.unrolledStoreExpr,
+                    //                         udwp.End(udwp.endExpr)))),
+                    //                     udwp.End(udwp.endExpr))))),
+                    //                 udwp.End(udwp.endExpr)),
+                    //             udwp.End(udwp.zeroExpr)))))))))
+
+                    // udwp.genRuntimeCode params idxs tree
+                } else{
+                    let _ = if (packoutch > depth_multiplier){
+                        except("packoutch should be smaller than depth_multiplier")
+                    } else if (depth_multiplier % packoutch > 0){
+                        except("depth_multiplier could be devided by packoutch")
+                    } else if (depth_multiplier < (packoutch * unrolloutch)){
+                        except("output channel could be devided by packoutch * unrolloutch")
+                    } else{
+                        _end_
+                    }
+
+                    let internalparams = u.InternalParameters(stride, padding, dilation, depth_multiplier, 1, 
+                        input_t, input_dtype, input_shape_tuple, input_scale, input_zero_point, 
+                        output_t, output_dtype, output_shape_tuple, output_scale, output_zero_point, 
+                        weight, weight_shape_tuple, weight_scales, weight_zero_points,
+                        bias, bias_scales, bias_zero_points, framework, nchw, depthwise, unroll, pack)
+                    // let params = u.initCodeGen templateparams internalparams
+                    // let idxs = u.Indexes(0, 0, 0)
+                    // let tree =  u.Op(u.setBatchInputOutputExpr,
+                    //             u.Op(u.setBiasExpr, 
+                    //             u.Op(u.setWeightExpr, 
+                    //             u.Op(u.setInputpatternExpr,
+                    //             u.Op(u.setMultShiftExpr,
+                    //             u.Op(u.setZeropointsExpr,
+                    //             u.Op(u.setPadExpr,
+                    //             u.Block(u.batchLoopExpr,
+                    //                 u.Block(u.tiledInputPatternLoopExpr,
+                    //                     u.Op(u.setWeightidxExpr,
+                    //                     u.Block(u.tiledOutputChannelLoopExpr,
+                    //                         u.Op(u.setIternameInput,
+                    //                         u.Op(u.unrolledLoadSumExpr,
+                    //                         u.Op(u.unrolledSetInputpatternidxExpr,
+                    //                         u.Block(u.weightLoopExpr,
+                    //                             u.Op(u.unrolledInputSubviewExpr,
+                    //                             u.Op(u.unrolledLoadInputWeightAndFMAExpr,
+                    //                             u.Op(u.unrolledUpdateInputpatternidxExpr,
+                    //                             u.End(u.endExpr)))),
+                    //                         u.Op(u.unrolledStoreExpr,
+                    //                         u.End(u.endExpr)))))),
+                    //                     u.End(u.endExpr))),
+                    //                 u.End(u.endExpr)),
+                    //             u.End(u.zeroExpr)))))))))
+                    let params = udw.initCodeGen templateparams internalparams
+                    let idxs = udw.Indexes(0, 0, 0)
+                    let tree =  udw.Op(udw.setBatchInputOutputExpr,
+                                udw.Op(udw.setBiasExpr, 
+                                udw.Op(udw.setWeightExpr, 
+                                udw.Op(udw.setInputpatternExpr,
+                                udw.Op(udw.setMultShiftExpr,
+                                udw.Op(udw.setZeropointsExpr,
+                                udw.Op(udw.setPadExpr,
+                                udw.Block(udw.batchLoopExpr,
+                                    udw.Block(udw.tiledInputPatternLoopExpr,
+                                        udw.Op(udw.setWeightidxExpr,
+                                        udw.Op(udw.unrolledSetOutputidxExpr,
+                                        udw.Op(udw.unrolledInputSubviewExpr,
+                                        udw.Block(udw.tiledOutputChannelLoopExpr,
+                                            udw.Op(udw.setIternameInput,
+                                            udw.Op(udw.unrolledLoadSumExpr,
+                                            udw.Op(udw.unrolledLoadInputWeightAndFMAExpr,
+                                            udw.Op(udw.unrolledStoreExpr,
+                                            udw.End(udw.endExpr))))),
+                                        udw.End(udw.endExpr))))),
+                                    udw.End(udw.endExpr)),
+                                udw.End(udw.zeroExpr)))))))))
+
+                    udw.genRuntimeCode params idxs tree
+                }
+            } else{
+                let internalparams = u.InternalParameters(stride, padding, dilation, groups, 1, 
+                    input_t, input_dtype, input_shape_tuple, input_scale, input_zero_point, 
+                    output_t, output_dtype, output_shape_tuple, output_scale, output_zero_point, 
+                    weight, weight_shape_tuple, weight_scales, weight_zero_points,
+                    bias, bias_scales, bias_zero_points, framework, nchw, depthwise, unroll, pack)
+                let params = u.initCodeGen templateparams internalparams
+                let idxs = u.Indexes(0, 0, 0)
+                let tree =  u.Op(u.setBatchInputOutputExpr,
+                            u.Op(u.setBiasExpr, 
+                            u.Op(u.setWeightExpr, 
+                            u.Op(u.setInputpatternExpr,
+                            u.Op(u.setMultShiftExpr,
+                            u.Op(u.setZeropointsExpr,
+                            u.Op(u.setPadExpr,
+                            u.Block(u.batchLoopExpr,
+                                u.Block(u.tiledInputPatternLoopExpr,
+                                    u.Op(u.setWeightidxExpr,
+                                    u.Block(u.groupLoopExpr,
+                                        u.Block(u.tiledOutputChannelLoopExpr,
+                                            u.Op(u.unrolledLoadSumExpr,
+                                            u.Op(u.unrolledSetInputpatternidxExpr,
+                                            u.Block(u.weightLoopExpr,
+                                                u.Op(u.unrolledInputSubviewExpr,
+                                                u.Block(u.tiledInputChannelLoopExpr, 
+                                                    u.Op(u.unrolledLoadInputWeightAndFMAExpr,
+                                                    u.End(u.endExpr)),
+                                                u.Op(u.unrolledUpdateInputpatternidxExpr,
+                                                u.End(u.endExpr)))),
+                                            u.Op(u.unrolledStoreExpr,
+                                            u.End(u.endExpr))))),
+                                        u.End(u.endExpr)),
+                                    u.End(u.endExpr))),
+                                u.End(u.endExpr)),
+                            u.End(u.zeroExpr)))))))))
+
+                u.genRuntimeCode params idxs tree
+                // let params = udw.initCodeGen templateparams internalparams
+                // let idxs = udw.Indexes(0, 0, 0)
+                // let tree =  udw.Op(udw.setBatchInputOutputExpr,
+                //             udw.Op(udw.setBiasExpr, 
+                //             udw.Op(udw.setWeightExpr, 
+                //             udw.Op(udw.setInputpatternExpr,
+                //             udw.Op(udw.setMultShiftExpr,
+                //             udw.Op(udw.setZeropointsExpr,
+                //             udw.Op(udw.setPadExpr,
+                //             udw.Block(udw.batchLoopExpr,
+                //                 udw.Block(udw.tiledInputPatternLoopExpr,
+                //                     udw.Op(udw.setWeightidxExpr,
+                //                     udw.Block(udw.groupLoopExpr,
+                //                         udw.Block(udw.tiledOutputChannelLoopExpr,
+                //                             udw.Op(udw.unrolledLoadSumExpr,
+                //                             udw.Op(udw.unrolledSetOutputidxExpr,
+                //                             udw.Op(udw.unrolledInputSubviewExpr,
+                //                             udw.Block(udw.tiledInputChannelLoopExpr, 
+                //                                 udw.Op(udw.unrolledLoadInputWeightAndFMAExpr,
+                //                                 udw.End(udw.endExpr)),
+                //                             udw.Op(udw.unrolledStoreExpr,
+                //                             udw.End(udw.endExpr)))))),
+                //                         udw.End(udw.endExpr)),
+                //                     udw.End(udw.endExpr))),
+                //                 udw.End(udw.endExpr)),
+                //             udw.End(udw.zeroExpr)))))))))
+
+                // udw.genRuntimeCode params idxs tree
+            }
+        }
+    }
+}
+
+_end_

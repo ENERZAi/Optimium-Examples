@@ -1,0 +1,122 @@
+// depthwise convolution opus implemenation
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+module conv2dtranspose.conv2transposedhelper as u
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun conv2dtranspose(inputs : input_t, mut &outputs : output_t) -> i32 {
+    // compiletime operations
+    ${
+        print("conv2dtranspose compiletime")
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Conv2dtranspose x   -> index <- i
+                    | _                 -> _end_
+            }
+            index
+        )
+        let thislayer_params = 
+            match (ll.item index layer_params) with
+                | params.Conv2dtranspose x -> x
+
+        let input_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input_scale = ll.item 0 (ll.item layerindex input_scales)
+        let input_zero_point = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_dtype = ll.item 0 (ll.item layerindex output_dtypes)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scale = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_point = ll.item 0 (ll.item layerindex output_zero_points)
+
+        let weight = ll.item 1 (ll.item layerindex input_data)
+        let weight_shape = ll.item 1 (ll.item layerindex input_shapes)
+        let weight_scales = ll.item 1 (ll.item layerindex input_scales)
+        let weight_zero_points = ll.item 1 (ll.item layerindex input_zero_points)
+
+        let bias = ll.item 2 (ll.item layerindex input_data)
+        let bias_scales = ll.item 2 (ll.item layerindex input_scales)
+        let bias_zero_points = ll.item 2 (ll.item layerindex input_zero_points)
+
+        let framework = thislayer_params->framework
+        let nchw = thislayer_params->nchw
+        let stride = thislayer_params->stride
+        let padding = thislayer_params->padding
+        let dilation = thislayer_params->dilation
+        
+        let pack = (ll.item 0 (optim_params->pack), ll.item 1 (optim_params->pack))
+        let unroll = (ll.item 0 (optim_params->unroll), ll.item 1 (optim_params->unroll), ll.item 2 (optim_params->unroll), ll.item 3 (optim_params->unroll))
+        let (packinch, packoutch) = pack
+        let (unrollrow, unrollcol, unrollinch, unrolloutch) = unroll
+
+        let input_shape_tuple = (ll.item 0 input_shape, ll.item 1 input_shape, ll.item 2 input_shape, ll.item 3 input_shape)
+        let output_shape_tuple = (ll.item 0 output_shape, ll.item 1 output_shape, ll.item 2 output_shape, ll.item 3 output_shape)
+        let weight_shape_tuple = (ll.item 0 weight_shape, ll.item 1 weight_shape, ll.item 2 weight_shape, ll.item 3 weight_shape)
+        let (_, outrows, outcols, outch) = output_shape_tuple
+
+        let _ = if(unrollrow > outrows){
+            except("unroll along output row axis(" + toStr(unrollrow) + ") should be smaller than outrows(" + toStr(outrows) + ")")
+        } else if(unrollcol > outcols){
+            except("unroll along output col axis(" + toStr(unrollcol) + ") should be smaller than outcols(" + toStr(outcols) + ")")
+        } else{
+            _end_
+        }
+
+        let _ = if (packinch > 1){
+            except("pack along input channel is expected 1 but got " + toStr(packinch) + ".")
+        } else{
+            _end_
+        }
+
+        let _ = if(packoutch * unrolloutch > outch){
+            except("output channel(" + toStr(outch) + ") should be bigger than packoutch * unrolloutch(" + toStr(packoutch * unrolloutch) + ")")
+        } else{
+            _end_
+        }
+
+        let templateparams = u.TemplateParameters(stride, padding, dilation, 1,
+            input_t, input_dtype, input_shape_tuple, input_scales, input_zero_points, 
+            output_t, output_dtype, output_shape_tuple, output_scales, output_zero_points, 
+            weight, weight_shape_tuple, weight_scales, weight_zero_points,
+            bias, bias_scales, bias_zero_points, framework, nchw, unroll, pack)
+        let params = u.initCodeGen templateparams
+        let idxs = u.Indexes(0, 0, 0)
+        let tree =  u.Op(u.setBiasExpr, 
+                    u.Op(u.setWeightExpr, 
+                    u.Op(u.setInputpatternExpr,
+                    u.Op(u.setMultShiftExpr,
+                    u.Op(u.setZeropointsExpr,
+                    u.Op(u.setPadExpr,
+                    u.Block(u.batchLoopExpr,
+                        u.Block(u.tiledInputPatternLoopExpr,
+                            u.Op(u.setWeightidxExpr,
+                            u.Block(u.groupLoopExpr,
+                                u.Block(u.tiledOutputChannelLoopExpr,
+                                    u.Op(u.unrolledLoadSumExpr,
+                                    u.Op(u.unrolledSetInputpatternidxExpr,
+                                    u.Block(u.weightLoopExpr,
+                                        u.Op(u.unrolledInputSubviewExpr,
+                                        u.Block(u.tiledInputChannelLoopExpr, 
+                                            u.Op(u.unrolledLoadInputWeightAndFMAExpr,
+                                            u.End(u.endExpr)),
+                                        u.Op(u.unrolledUpdateInputpatternidxExpr,
+                                        u.End(u.endExpr)))),
+                                    u.Op(u.unrolledStoreExpr,
+                                    u.End(u.endExpr))))),
+                                u.End(u.endExpr)),
+                            u.End(u.endExpr))),
+                        u.End(u.endExpr)),
+                    u.End(u.zeroExpr))))))))
+
+        u.genRuntimeCode params idxs tree
+    }
+}
+
+_end_

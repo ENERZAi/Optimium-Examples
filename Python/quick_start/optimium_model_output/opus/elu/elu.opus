@@ -1,0 +1,303 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun elu(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${  
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Elu x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex layer_params) with 
+                | params.Elu x -> x
+
+        let algorithm = optim_params->algorithm
+        let isLookup = (algorithm == "lookup") 
+        
+        let pack = if(isLookup){1} else{ll.item 0 (optim_params->pack)} 
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input1_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)  
+        for (i from 0 to (ll.len output_shape)){
+            if(ll.item i output_shape == ll.item i input1_shape){
+                _end_
+            } else{
+                except("output shape(" + toStr(output_shape) + ") is not compatible with expected shape(" + toStr(input1_shape) + "}")
+            }
+        }
+
+        let rec shape_size index shape data =
+            if(index == (ll.len shape)){
+                data
+            }
+            else{
+                shape_size (index+1) shape (data*(ll.item index shape))
+            }
+        let input1_size = shape_size 0 input1_shape 1
+        let output_size = shape_size 0 output_shape 1
+
+        let _ = if((pack * unroll > input1_size)){
+            except("pack * unroll(" + toStr(pack * unroll) + ") should be larger than size of input1(" + toStr(input1_size) + ")")
+        } else{
+            _end_
+        }
+        
+        let tiles =
+            if(input1_size % pack == 0){
+                [(0, input1_size); (input1_size, input1_size)]
+            } else{
+                let end1 = input1_size - (input1_size % pack)
+                [(0, end1); (end1, input1_size)]
+            }
+
+        let zero_tensor = 
+        if (input1_dtype== rtType(f32)){
+                ut.TensorF32(tensor((1,), 0.f))
+            }else if(input1_dtype == rtType(f16)){
+                ut.TensorF16(tensor((1,), 0.f16))
+            }else if(input1_dtype == rtType(i8)){
+                input1_zero_points
+            } else{
+                except("ff")
+            }
+        
+        let isQuant = if(input1_dtype == rtType(i8)){true} else{false}
+        
+        let (start, end) = ll.item 0 tiles
+        let (start2, end2) = ll.item 1 tiles
+        
+        if(isQuant){
+            if(isLookup){
+                let mut lookup = tensor((256,),0i16)
+                for (i from -128 to 128 step 1){
+                    if(i > (ut.toCtTensorI32 input1_zero_points[(0,)])) {
+                        lookup[(i+128,)] <- cast<i16>((cast<f32>(i-((ut.toCtTensorI32 input1_zero_points)[(0,)]))*((ut.toCtTensorF32 input1_scales)[(0,)])/((ut.toCtTensorF32 output_scales)[(0,)])) + 0.5f32) + cast<i16>((ut.toCtTensorI32 output_zero_points)[(0,)])
+                        if(lookup[(i+128,)] > 127i16){
+                            lookup[(i+128,)] <- 127i16
+                            _end_
+                        } else{
+                            _end_
+                        }
+                    }else{
+                        lookup[(i+128,)] <- cast<i16>((__exp(cast<f32>(i-((ut.toCtTensorI32 input1_zero_points)[(0,)]))*((ut.toCtTensorF32 input1_scales)[(0,)])) - 1f32)/((ut.toCtTensorF32 output_scales)[(0,)]) - 0.5f32) + cast<i16>((ut.toCtTensorI32 output_zero_points)[(0,)])
+                        if(lookup[(i+128,)] < -128i16){
+                            lookup[(i+128,)] <- -128i16
+                            _end_
+                        } else{
+                            _end_
+                        }
+                    }
+                }
+                !{
+                    let mut batchoutput = &outputs[|0|]
+                    let batchinput1 = inputs[|0|]
+                    let lookup = ${cast<i8>(lookup)}
+                    
+                    let batchin = reshapeTo((${input1_size},),&batchinput1)
+                    let mut outp = reshapeTo((${output_size},),&batchoutput)
+                    for(idx0 from 0 to ${start2} step ${pack}){
+                        outp[(idx0,)] <- lookup[((cast<i32>(batchin[(idx0,)] ) + 128i32),)]
+                    }
+                    batchoutput <- reshapeTo(${ll.toRtTuple output_shape},outp)
+                    0
+                }
+                //lookuptable
+            } else{
+                let expr1 = 
+                    !{
+                        let dequan = (cast<f32>(batchin[(idx0:idx0+${pack}:1i,)] - ${ut.toRtTensor zero_tensor})*${ut.toRtTensor input1_scales})
+                        let flag =  cast<f32>(cast<i32>(dequan >  tensor((1,),0.f32)))            
+                        let elu_data = (flag*dequan + (tensor((1,),1f) - flag)*(__exp(dequan) - tensor((1,),1f)))
+                        let scaled = elu_data/${ut.toRtTensor output_scales}
+                        let flag2 = cast<f32>(cast<i32>(scaled >  tensor((1,),0.f32)))
+
+                        outp[(idx0:idx0+${pack}:1i,)] <- (cast<i8>(flag2 + scaled - tensor((1,),0.5f)) + ${ut.toRtTensor output_zero_points})
+                    }
+                if(end2 - start2 > 0){
+                    !{  
+                        let mut batchoutput = &outputs[|0|]
+                        let batchinput1 = inputs[|0|]
+
+                        let batchin = reshapeTo((${input1_size},),&batchinput1)
+                        let mut outp = reshapeTo((${output_size},),&batchoutput)
+                        for(idx0 from 0 to ${start2} step ${pack}){
+                            ${expr1}
+                        }
+                        let dequan = (cast<f32>(batchin[(${start2}:${end2}:1i,)] - ${ut.toRtTensor zero_tensor})*${ut.toRtTensor input1_scales})
+                        let flag =  cast<f32>(cast<i32>(dequan >  tensor((1,),0.f32)))            
+                        let elu_data = (flag*dequan + (tensor((1,),1f) - flag)*(__exp(dequan) - tensor((1,),1f)))
+                        let scaled = elu_data/${ut.toRtTensor output_scales}
+                        let flag2 = cast<f32>(cast<i32>(scaled >  tensor((1,),0.f32)))
+
+                        outp[(${start2}:${end2}:1i,)] <- (cast<i8>(flag2 + scaled - tensor((1,),0.5f)) + ${ut.toRtTensor output_zero_points})
+                    
+                        0
+                    }
+                } else{
+                    !{
+                        let mut batchoutput = &outputs[|0|]
+                        let batchinput1 = inputs[|0|]
+
+                        let batchin = reshapeTo((${input1_size},),&batchinput1)
+                        let mut outp = reshapeTo((${output_size},),&batchoutput)
+                        for(idx0 from 0 to ${start2} step ${pack}){
+                            ${expr1}
+                        }
+                        0
+                    }
+                }
+            }
+        } else if(input1_dtype == rtType(f32)){
+            let expr1 = 
+                !{
+                    let inp = batchin[(idx0:idx0+${pack}:1i,)]
+                    let neg_inp = __min(__max(inp,denorm_cutoff),zeros)
+                    let mut n = neg_inp * log2e + magic_bias
+                    let bitcasted = bitcast<i32>(n)
+
+                    let s = bitcast<f32>(bitcasted << shifts)
+
+                    n <- -(magic_bias - n)
+
+                    let mut t = n * minus_ln2 + neg_inp
+
+                    let mut p = c5 * t + c4 // 5th order approximation
+                    p <- p * t + c3
+                    p <- p * t + c2
+                    p <- p * t + c1
+
+                    t <- t * s
+                    let f1 = t * p + s
+
+                    outp[(idx0:idx0+${pack}:1i,)] <- __max(inp,zeros) + f1 - tensor((1,),1f32)
+                }
+            if(end2 - start2 > 0){
+                !{
+                    let mut batchoutput = &outputs[|0|]
+                    let batchinput1 = inputs[|0|]
+
+                    let batchin = reshapeTo((${input1_size},),&batchinput1)
+                    let mut outp = reshapeTo((${output_size},),&batchoutput)
+
+                    let magic_bias = tensor((1,), 12583039.000000f) // 2 ^ 24 - 2 ^ 22 + 127
+                    let log2e = tensor((1,), 1.4426950216293335f)
+                    let minus_ln2 = tensor((1,), -0.6931471824645996f)
+                    let denorm_cutoff = tensor((1,), -87.33654022216797f) // f32
+
+                    let c1 = tensor((1,), 0.9999997019767761f)
+                    let c2 = tensor((1,), 0.4999915063381195f)
+                    let c3 = tensor((1,), 0.1666765213012695f)
+                    let c4 = tensor((1,), 0.0418978221714497f)
+                    let c5 = tensor((1,), 0.0082892905920744f)
+
+                    let one = tensor((1,), 1.0f)
+                    let zeros = tensor((1,), 0.0f)
+                    let shifts = tensor((1,), 23i)
+                    for(idx0 from 0 to ${start2} step ${pack}){
+                        ${expr1}
+                    }
+                    let inp = batchin[(${start2}:${end2}:1i,)]
+                    let neg_inp = __min(__max(inp,denorm_cutoff),zeros)
+                    let mut n = neg_inp * log2e + magic_bias
+                    let bitcasted = bitcast<i32>(n)
+
+                    let s = bitcast<f32>(bitcasted << shifts)
+
+                    n <- -(magic_bias - n)
+
+                    let mut t = n * minus_ln2 + neg_inp
+
+                    let mut p = c5 * t + c4 // 5th order approximation
+                    p <- p * t + c3
+                    p <- p * t + c2
+                    p <- p * t + c1
+
+                    t <- t * s
+                    let f1 = t * p + s
+
+                    outp[(${start2}:${end2}:1i,)] <- __max(inp,zeros) + f1 - tensor((1,),1f32)
+                    0
+                }
+            } else{
+                !{
+                    let mut batchoutput = &outputs[|0|]
+                    let batchinput1 = inputs[|0|]
+
+                    let batchin = reshapeTo((${input1_size},),&batchinput1)
+                    let mut outp = reshapeTo((${output_size},),&batchoutput)
+
+                    let magic_bias = tensor((1,), 12583039.000000f) // 2 ^ 24 - 2 ^ 22 + 127
+                    let log2e = tensor((1,), 1.4426950216293335f)
+                    let minus_ln2 = tensor((1,), -0.6931471824645996f)
+                    let denorm_cutoff = tensor((1,), -87.33654022216797f) // f32
+
+                    let c1 = tensor((1,), 0.9999997019767761f)
+                    let c2 = tensor((1,), 0.4999915063381195f)
+                    let c3 = tensor((1,), 0.1666765213012695f)
+                    let c4 = tensor((1,), 0.0418978221714497f)
+                    let c5 = tensor((1,), 0.0082892905920744f)
+
+                    let one = tensor((1,), 1.0f)
+                    let zeros = tensor((1,), 0.0f)
+                    let shifts = tensor((1,), 23i)
+
+                    for(idx0 from 0 to ${start2} step ${pack}){
+                        ${expr1}
+                    }
+                    0
+                }
+            }
+        } else{
+            let expr1 = 
+                !{
+                    let flag =  cast<f16>(cast<i32>(batchin[(idx0:idx0+${pack}:1i,)] >  ${ut.toRtTensor zero_tensor}))            
+                    outp[(idx0:idx0+${pack}:1i,)] <- ((flag)*batchin[(idx0:idx0+${pack}:1i,)] + (tensor((1,),1f16) - (flag))*(__exp(batchin[(idx0:idx0+${pack}:1i,)]) - tensor((1,),1f16)))
+                }
+            if(end2 - start2 > 0){
+                !{
+                    let mut batchoutput = &outputs[|0|]
+                    let batchinput1 = inputs[|0|]
+
+                    let batchin = reshapeTo((${input1_size},),&batchinput1)
+                    let mut outp = reshapeTo((${output_size},),&batchoutput)
+                    for(idx0 from 0 to ${start2} step ${pack}){
+                        ${expr1}
+                    }
+                    let flag =  cast<f16>(cast<i32>(batchin[(${start2}:${end2}:1i,)]  >  ${ut.toRtTensor zero_tensor}))            
+                    outp[(${start2}:${end2}:1i,)] <- ((flag)*batchin[(${start2}:${end2}:1i,)]  + (tensor((1,),1f16) - (flag))*(__exp(batchin[(${start2}:${end2}:1i,)]) - tensor((1,),1f16)))
+                    0
+                }
+            } else{
+                !{
+                    let mut batchoutput = &outputs[|0|]
+                    let batchinput1 = inputs[|0|]
+
+                    let batchin = reshapeTo((${input1_size},),&batchinput1)
+                    let mut outp = reshapeTo((${output_size},),&batchoutput)
+                    for(idx0 from 0 to ${start2} step ${pack}){
+                        ${expr1}
+                    }
+                    0
+                }
+            }
+        }
+    }
+}

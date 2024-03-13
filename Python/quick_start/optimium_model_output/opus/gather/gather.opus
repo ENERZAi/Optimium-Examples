@@ -1,0 +1,103 @@
+module core.List.List as ll
+module common.uniontensor as ut
+module common.params as params
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: ll.List<params.Layerargs>,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_edges: ll.List<ll.List<tuple<i32, i32>>>, output_edges: ll.List<ll.List<tuple<i32, i32>>>, ismainops: ll.List<boolean>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+attr[Extern : attr_params->name, Optimization : { VectorSize : 512 }]
+fun gather(inputs: input_t, mut &outputs: output_t) -> i32 {
+    ${  
+        let layerindex = (
+            let mut index = 0
+            for(i from 0 to (ll.len layer_params)){
+                match (ll.item i layer_params) with 
+                    | params.Gather x   -> if((ll.item i ismainops)){index <- i} else{_end_}
+                    | _                 -> _end_
+            }
+            index
+        )
+
+        let layerparams = 
+            match (ll.item layerindex layer_params) with 
+                | params.Gather x -> x
+
+        let pack = ll.item 0 (optim_params->pack)
+        let unroll = ll.item 0 (optim_params->unroll)
+        let input1_dtype = ll.item 0 (ll.item layerindex input_dtypes)
+        let input1_shape = ll.item 0 (ll.item layerindex input_shapes)
+        let input1_scales = ll.item 0 (ll.item layerindex input_scales)
+        let input1_zero_points = ll.item 0 (ll.item layerindex input_zero_points)
+        let output_shape = ll.item 0 (ll.item layerindex output_shapes)
+        let output_scales = ll.item 0 (ll.item layerindex output_scales)
+        let output_zero_points = ll.item 0 (ll.item layerindex output_zero_points)   
+        
+        let input1_dim = ll.len input1_shape
+        let output_dim = ll.len output_shape
+        let indice = ll.item 1 (ll.item layerindex input_data)
+        let indice_shape = ll.item 1 (ll.item layerindex input_shapes)
+        let indice_dim = ll.len indice_shape
+
+        let a = layerparams->axis
+        let batch_dims = layerparams->batch_dims
+        print(layerparams)
+
+        let axis = if(a < 0){if(input1_dim+1<0){except("axis must be larger than " + toStr(-input1_dim))}else{input1_dim+a}}else{a}
+        let rec index_str index =
+            if (index == axis){
+                let rec gather_str idx =
+                    if(idx == 0 && batch_dims == 0){
+                        (gather_str (index))
+                    }else if(idx < batch_dims - 1){
+                        ("idx"+toStr(idx));(gather_str (idx+1))
+                    }else if(idx == batch_dims - 1){
+                        ("idx"+toStr(idx));(gather_str (index))
+                    }else if(idx == index + indice_dim - batch_dims - 1){
+                        ["idx"+toStr(idx)]
+                    } else{
+                        ("idx"+toStr(idx));(gather_str (idx+1))
+                    }
+                if (index == input1_dim-1){
+                    [!{indice[${ll.toRtTuple (gather_str 0)}]}]
+                } else{
+                    (!{indice[${ll.toRtTuple (gather_str 0)}]});(index_str (index+indice_dim-batch_dims))
+                }
+            }else{
+                if (index == output_dim-1){
+                    [(!{${"idx"+toStr(index)}})]
+                } else{
+                    (!{${"idx"+toStr(index)}});(index_str (index+1))
+                }
+            }
+        let rec output_index_str index =
+            if (index == output_dim-1){
+                [(!{${"idx"+toStr(index)}})]
+            } else{
+                (!{${"idx"+toStr(index)}});(output_index_str (index+1))
+            }
+        print("1")
+        let ind_str = index_str 0
+        let out_str = output_index_str 0
+        print("2")
+        let rec tem1 idx =
+            if(idx == ll.len output_shape){
+                !{outp[(${ll.toRtTuple out_str})] <- batchin[(${ll.toRtTuple ind_str})]}
+            }else{
+                !{
+                    for(${"idx"+toStr(idx)} from 0 to ${ll.item idx output_shape} step 1){
+                        ${tem1 (idx+1)}
+                    }
+                    0
+                }
+            }
+        print("3")
+        !{
+            let mut outp = &outputs[|0|]
+            let batchin = inputs[|0|]
+            let indice = reshapeTo(${ll.toRtTuple indice_shape},${ut.toRtTensor indice})
+            ${tem1 0}
+        }
+    }
+}

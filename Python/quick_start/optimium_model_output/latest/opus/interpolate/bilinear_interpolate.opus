@@ -1,0 +1,154 @@
+module core.List.List as ll
+module interpolate.utils as u
+module interpolate.bilinear_utils as bu
+module common.params as params
+module common.utils as commonutils
+
+template</attr_params: params.Attributes, optim_params: params.Optimization, layer_params: params.Layerargs,
+    input_data: ll.List<ll.List<ut.UnionTensor>>, input_dtypes: ll.List<ll.List<rtType>>, input_shapes: ll.List<ll.List<i32>>, input_scales: ll.List<ll.List<ut.UnionTensor>>, input_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    output_dtypes: ll.List<ll.List<rtType>>, output_shapes: ll.List<ll.List<i32>>, output_scales: ll.List<ll.List<ut.UnionTensor>>, output_zero_points: ll.List<ll.List<ut.UnionTensor>>,
+    input_t: rtType, input_rt_list : ll.List<rtType>,  output_t: rtType, output_rt_list : ll.List<rtType>/>
+fun bilinear_interpolate(inputs : input_t, mut &outputs : output_t) -> f32{
+    ${
+        let pack = ll.item <| 0 <| (optim_params->pack)
+        let nchw = optim_params->nchw
+        let input_dtype = ll.item 0 (ll.item 0 input_dtypes)
+        let input_shape = ll.item 0 (ll.item 0 input_shapes)
+        let input_scale = ll.item 0 (ll.item 0 input_scales)
+        let input_zero_point = ll.item 0 (ll.item 0 input_zero_points)
+        let output_dtype = ll.item 0 (ll.item 0 output_dtypes)
+        let output_shape = ll.item 0 (ll.item 0 output_shapes)
+        let output_scale = ll.item 0 (ll.item 0 output_scales)
+        let output_zero_point = ll.item 0 (ll.item 0 output_zero_points)
+
+        let thislayer_params = 
+            match (ll.item 0 layer_params) with
+                | params.Interpolate x -> x
+                | _ -> except("not Linear")
+
+        let templateparams = u.TemplateParameters(input_shape, input_t, input_dtype, 
+                                                    output_shape, output_t, output_dtype,
+                                                    thislayer_params->scale_factor, thislayer_params->align_corners, thislayer_params->half_pixel_centers,
+                                                    thislayer_params->framework, nchw, pack, thislayer_params->antialias,
+                                                    thislayer_params->size, "coord", "accessed_input", input_scale, input_zero_point)
+        let params = u.initCodeGen templateparams
+
+        let batch = ll.item 0 input_shape
+        let spatial_dims = ((ll.len <| input_shape) - 2i)
+        let spatial_nums = (1i << spatial_dims)
+        let hw_nums = commonutils.factorial <| params->output_spatial_shape
+        let ch = ll.item ((ll.len <| input_shape) - 1) input_shape
+        let vec = ll.item 0 optim_params->pack
+        let unroll = ll.item 0 optim_params->unroll
+
+        let batchinputexpr nextexpr =
+            !{
+                let batchinput = inputs[|0|]
+                let mut batchoutput = &outputs[|0|]
+                ${nextexpr}
+            }
+
+        let rec get_unroll_vec_loop num index =
+            if (index == 0){
+                let rem = num % (unroll * vec)
+                ll.concat <| [num - rem] <| (get_unroll_vec_loop <| rem <| (index + 1))
+            }else if (index == 1) {
+                let rem = num % vec
+                ll.concat <| [num - rem] <| (get_unroll_vec_loop <| rem <| (index + 1))
+            } else{
+                [num]
+            }
+        
+        let _ = if(ch < (unroll * vec)){
+            except("It should not be reached")
+        } else{
+            _end_
+        }
+
+        // [first for loop range with unroll*vec stride, second for loop range with vec stride, third last small vector]
+        let loop_range = get_unroll_vec_loop <| ch <| 0
+
+        let expr1 = bu.setCoordExpr <| params <| spatial_dims
+        let expr2 = !{
+            for(${params->batch_iter} from 0i to ${batch}){
+                attr [ Parallel ]
+                for(${params->spatial_iter} from 0i to ${hw_nums}){
+                    ${
+                        let loopbody = !{
+                            let _ = ${
+                                if ((ll.item 0 loop_range) != 0){
+                                    !{
+                                        for(${params->channel_iter} from 0i to ${ll.item 0 loop_range} step ${vec * unroll}){
+                                            ${
+                                                let expr2_1 = bu.genRectanglePointAccess <| spatial_dims <| spatial_nums <| vec <| unroll <| params
+                                                let expr2_2 = bu.genAllterms <| spatial_dims <| spatial_nums <| unroll <| params
+                                                let expr2_3 = bu.genWeightedSum <| spatial_dims <| spatial_nums <| unroll <| params
+                                                let expr2_4 = bu.genStore <| spatial_dims <| spatial_nums <| vec <| unroll <| params
+                                                expr2_1 <| (expr2_2 <| (expr2_3 <| (expr2_4 )))  // (expr2_2 <| (expr2_3 <| expr2_4))
+                                            }
+                                        }
+                                    }
+                                }else{
+                                    !{
+                                        let _ = 0
+                                    }
+                                }
+                            }
+                            let _ = ${
+                                if((ll.item 1 loop_range) != 0){
+                                    !{
+                                        for(${params->channel_iter} from ${ll.item 0 loop_range} to ${(ll.item 0 loop_range) + (ll.item 1 loop_range)} step ${vec}){
+                                            ${
+                                                let expr2_1 = bu.genRectanglePointAccess <| spatial_dims <| spatial_nums <| vec <| 1 <| params
+                                                let expr2_2 = bu.genAllterms <| spatial_dims <| spatial_nums <| 1 <| params
+                                                let expr2_3 = bu.genWeightedSum <| spatial_dims <| spatial_nums <| 1 <| params
+                                                let expr2_4 = bu.genStore <| spatial_dims <| spatial_nums <| vec <| 1 <| params
+                                                expr2_1 <| (expr2_2 <| (expr2_3 <| expr2_4))
+                                            }
+                                        }
+                                    }
+                                } else{
+                                    !{
+                                        let _ = 0
+                                    }
+                                }
+                            }
+                            ${
+                                if ((ll.item 2 loop_range) > 0){
+                                    let expr2_1 = bu.genRectanglePointAccess <| spatial_dims <| spatial_nums <| (ll.item 2 loop_range) <| 1 <| params
+                                    let expr2_2 = bu.genAllterms <| spatial_dims <| spatial_nums <| 1 <| params
+                                    let expr2_3 = bu.genWeightedSum <| spatial_dims <| spatial_nums <| 1 <| params
+                                    let expr2_4 = bu.genStore <| spatial_dims <| spatial_nums <| (ll.item 2 loop_range) <| 1 <| params
+                                    expr2_1 <| (expr2_2 <| (expr2_3 <| expr2_4))
+                                } else{
+                                    !{
+                                        _end_
+                                    }
+                                }
+                                
+                            }
+                        }
+
+                        let spatial_index_expr = u.get_Spatial_index <| params->spatial_iter <| params
+                        let rec get_spatial_var spatial_idx_ = 
+                            if(spatial_idx_ == (ll.len <| spatial_index_expr -1)){
+                                !{
+                                    let ${params->flatten_idxname + "_" + toStr(spatial_idx_)} = ${ll.item spatial_idx_ spatial_index_expr}
+                                    ${loopbody}
+                                }
+                            } else{
+                                !{
+                                    let ${params->flatten_idxname + "_" + toStr(spatial_idx_)} = ${ll.item spatial_idx_ spatial_index_expr}
+                                    ${ get_spatial_var <| (spatial_idx_ + 1)}
+                                }
+                            }
+                        get_spatial_var <| 0
+                        
+                    }
+                }
+            }
+            0.f32
+        }
+        batchinputexpr <| (expr1 <| expr2)
+    }
+}

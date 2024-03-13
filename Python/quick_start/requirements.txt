@@ -1,2 +1,4 @@
 optimium-runtime[native,xnnpack]
 numpy
+face-detection-tflite
+pillow==9.5.0
