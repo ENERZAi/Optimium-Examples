@@ -23,10 +23,12 @@ This example describes how to run face detection model in Python with Optimium.
     # Optimize the model
     $OPTIMIUM_SDK_ROOT/run_optimium.sh --working_dir $YOUR_WORKING_DIR
     ```
+
 3. Copy optimized model folder (NOT contents of the model folder) into current folder.
     ``` bash
     cp -rf $YOUR_WORKING_DIR/outputs/{device_name}-{num_thread}-{opt_log_key}/{out_dirname}/ ./optimium_model_output
     ```
+
 4. Run python example
     ``` python
     python3 face_detection_example.py

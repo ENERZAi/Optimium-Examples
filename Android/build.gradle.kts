@@ -79,7 +79,9 @@ dependencies {
     val exif_interface_version = "1.3.7"
     implementation("androidx.exifinterface:exifinterface:${exif_interface_version}")
 
-    implementation("com.enerzai.optimium:runtime-android:0.3.2")
+    implementation("com.enerzai.optimium.runtime:android:0.3.2")
+    runtimeOnly("com.enerzai.optimium.runtime:android-native:0.3.2")
+    runtimeOnly("com.enerzai.optimium.runtime:android-xnnpack:0.3.2")
 
     implementation(files("libs/opencv_java_shared_4.9.0.aar"))
 }
