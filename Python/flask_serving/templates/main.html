@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+  <title>Optimium Web Example</title>
+  <style>
+    html, body {
+      height: 100% !important;
+      width: 100% !important;
+    }
+
+    input[type=file] {
+      display: none;
+    }
+  </style>
+</head>
+<body class="max-w-full">
+    <div class="container mx-auto flex flex-col justify-center" style="height: 100%;">
+        <div class="border rounded-2xl bg-gray-100">
+            <div class="flex flex-row justify-center pb-4">
+              <h1 class="mx-auto p-4 text-3xl font-bold">Optimium Web Example</h1>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div class="mx-auto my-8">
+                  <img id="image" class="border rounded-2xl px-auto bg-gray-300 w-96 h-96">
+              </div>
+              <div class="m-4">
+                <p id="classification">Classification: -</p>
+                <p id="score">Score: -</p>
+                <p id="class-id">ID: -</p>
+                <div class="max-w-full flex flex-row justify-center mt-8">
+                  <label for="upload" class="bg-gray-500 border-gray-600 rounded-2xl hover:bg-gray-600 hover:border-gray-700 py-2 px-4">
+                    Upload & Run!
+                  </label>
+                  <input type="file" name="file" accept="image/*" id="upload">
+                </div>
+              </div>
+            </div>            
+        </div>
+    </div>
+    <script>
+      $(() => {
+        let $classification = $("#classification");
+        let $score = $("#score");
+        let $id = $("#class-id");
+        let $image = $("#image");
+
+        $("#upload").on("change", (e) => {
+          let file = e.target.files[0];
+          let url = URL.createObjectURL(file);
+          $image.attr("src", url);
+
+
+          let formData = new FormData();
+          console.log("a");
+          formData.append("file", file, file.name);
+          console.log("b");
+
+          let data = {
+            url: "http://localhost:5000/infer",
+            data: formData,
+            contentType: false,
+            processData: false,
+            type: "post",
+            success: (result, status) => {
+              console.log(result);
+
+              let cls = result['result'].map((v) => v['object']).join(", ");
+              let sco = result['result'].map((v) => v['score']).join(", ");
+              let ids = result['result'].map((v) => v['id']).join(", ");
+
+              $classification.text(`Classification: ${cls}`);
+              $score.text(`Score: ${sco}`);
+              $id.text(`ID: ${ids}`);
+            }
+          }
+
+          $.ajax(data);
+        });
+      });
+    </script>
+</body>
+</html>
